@@ -30,6 +30,16 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # catch real hangs in the app/BLE logic.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 
+# --- LVGL memory: use the C-lib allocator (ESP-IDF heap) instead of LVGL's
+# small static builtin pool. A busy mesh's node list creates hundreds of LVGL
+# objects and OOM-crashed the LVGL task against the 64KB builtin pool; routing
+# allocations through malloc() lets them spill into the 32MB PSRAM. Lower the
+# SPIRAM "always internal" threshold so those mid-size object allocations are
+# allowed to fall back to PSRAM once internal RAM is pressured. ---
+# CONFIG_LV_USE_BUILTIN_MALLOC is not set
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+
 # --- LVGL fonts for the UI type scale (design: 13/16/18/26) ---
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y

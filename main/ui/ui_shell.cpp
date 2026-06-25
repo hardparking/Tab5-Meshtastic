@@ -58,7 +58,6 @@ struct ShellState {
     NodeSort  sort           = SORT_HEARD;
     uint32_t  last_gen       = 0xffffffff;
     NodeSort  last_sort      = SORT_HEARD;
-    int64_t   last_build_us  = 0;
 };
 ShellState S;
 
@@ -331,17 +330,14 @@ void refresh_cb(lv_timer_t*)
 #endif
 
     /* Rebuild the node list only on a meaningful change or a sort change — never
-     * on SNR jitter (FR-3.2). While the Nodes tab is visible, also rebuild every
-     * 3 s so the relative last-heard ages stay live. */
-    uint32_t gen   = app_state_nodes_gen();
-    int64_t  now   = esp_timer_get_time();
-    bool     view  = (S.active == 0);
-    bool     aged  = view && (now - S.last_build_us > 3000000);
-    if (gen != S.last_gen || S.sort != S.last_sort || aged) {
-        rebuild_nodes(now);
-        S.last_gen      = gen;
-        S.last_sort     = S.sort;
-        S.last_build_us = now;
+     * on SNR jitter (FR-3.2) and never on a timer (rebuilding the whole list
+     * churns hundreds of LVGL objects). Relative last-heard ages refresh on the
+     * next meaningful change, which a live mesh produces continually. */
+    uint32_t gen = app_state_nodes_gen();
+    if (gen != S.last_gen || S.sort != S.last_sort) {
+        rebuild_nodes(esp_timer_get_time());
+        S.last_gen  = gen;
+        S.last_sort = S.sort;
     }
 }
 
