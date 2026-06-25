@@ -64,16 +64,42 @@ typedef struct {
     diag_t       diag;
 } app_snapshot_t;
 
+/* ---- node DB (PRD §10) ---- */
+#define APP_MAX_NODES 256
+
+typedef struct {
+    uint32_t num;
+    char     long_name[40];
+    char     short_name[8];
+    float    snr;
+    int      hops;           /* hops_away (0 = direct)            */
+    bool     has_user;
+    int64_t  last_heard_us;  /* esp_timer time at last update     */
+} node_rec_t;
+
 void app_state_init(void);
 
 /* ---- publishers (called from the BLE/transport layer) ---- */
 void app_state_set_conn(conn_state_t state, const char* stage);
 void app_state_set_myinfo(uint32_t num, const char* long_name, const char* short_name);
-void app_state_set_node_count(uint32_t count);
 void app_state_set_diag(const diag_t* diag);
 
-/* ---- reader (called from the UI/LVGL task) ---- */
+/* Insert or update a node. Updates snr/last_heard silently; bumps the node
+ * generation only on a MEANINGFUL change (new node, or changed name / hops /
+ * has_user) so SNR jitter never triggers a full list repaint (FR-3.2). */
+void app_state_upsert_node(uint32_t num, const char* long_name, const char* short_name,
+                           float snr, int hops, bool has_user, int64_t now_us);
+void app_state_clear_nodes(void);
+
+/* ---- readers (called from the UI/LVGL task) ---- */
 void app_state_snapshot(app_snapshot_t* out);
+
+/* Generation counter: changes whenever the node list meaningfully changed. The
+ * UI compares it to decide whether to rebuild rows. */
+uint32_t app_state_nodes_gen(void);
+
+/* Copy the node DB into out[0..max). Returns the number copied. */
+uint32_t app_state_copy_nodes(node_rec_t* out, uint32_t max);
 
 /* True for states where the radio link is up and healthy (drives chip color). */
 bool conn_is_linked(conn_state_t state);

@@ -18,6 +18,9 @@ namespace {
 struct AppState {
     SemaphoreHandle_t mtx;
     app_snapshot_t    s;
+    node_rec_t        nodes[APP_MAX_NODES];
+    uint32_t          node_n;
+    uint32_t          nodes_gen;
 };
 
 AppState g;
@@ -61,17 +64,60 @@ void app_state_set_myinfo(uint32_t num, const char* long_name, const char* short
     unlock();
 }
 
-void app_state_set_node_count(uint32_t count)
-{
-    lock();
-    g.s.node_count = count;
-    unlock();
-}
-
 void app_state_set_diag(const diag_t* diag)
 {
     lock();
     g.s.diag = *diag;
+    unlock();
+}
+
+void app_state_upsert_node(uint32_t num, const char* long_name, const char* short_name,
+                           float snr, int hops, bool has_user, int64_t now_us)
+{
+    lock();
+    node_rec_t* rec = nullptr;
+    for (uint32_t i = 0; i < g.node_n; i++) {
+        if (g.nodes[i].num == num) { rec = &g.nodes[i]; break; }
+    }
+
+    bool meaningful = false;
+    if (!rec) {
+        if (g.node_n >= APP_MAX_NODES) { unlock(); return; }  /* bounded (NFR-4) */
+        rec = &g.nodes[g.node_n++];
+        memset(rec, 0, sizeof(*rec));
+        rec->num         = num;
+        g.s.node_count   = g.node_n;
+        meaningful       = true;   /* new node */
+    }
+
+    /* meaningful field changes (topology / identity), not SNR jitter */
+    if (has_user) {
+        if (!rec->has_user ||
+            strncmp(rec->long_name, long_name ? long_name : "", sizeof(rec->long_name)) != 0 ||
+            strncmp(rec->short_name, short_name ? short_name : "", sizeof(rec->short_name)) != 0) {
+            meaningful = true;
+        }
+        copy_str(rec->long_name, sizeof(rec->long_name), long_name);
+        copy_str(rec->short_name, sizeof(rec->short_name), short_name);
+        rec->has_user = true;
+    }
+    if (rec->hops != hops) meaningful = true;
+    rec->hops = hops;
+
+    /* always-fresh fields (silent) */
+    rec->snr           = snr;
+    rec->last_heard_us = now_us;
+
+    if (meaningful) g.nodes_gen++;
+    unlock();
+}
+
+void app_state_clear_nodes(void)
+{
+    lock();
+    g.node_n       = 0;
+    g.s.node_count = 0;
+    g.nodes_gen++;
     unlock();
 }
 
@@ -80,6 +126,23 @@ void app_state_snapshot(app_snapshot_t* out)
     lock();
     *out = g.s;
     unlock();
+}
+
+uint32_t app_state_nodes_gen(void)
+{
+    lock();
+    uint32_t gen = g.nodes_gen;
+    unlock();
+    return gen;
+}
+
+uint32_t app_state_copy_nodes(node_rec_t* out, uint32_t max)
+{
+    lock();
+    uint32_t n = g.node_n < max ? g.node_n : max;
+    memcpy(out, g.nodes, n * sizeof(node_rec_t));
+    unlock();
+    return n;
 }
 
 bool conn_is_linked(conn_state_t state)

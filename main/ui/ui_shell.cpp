@@ -15,7 +15,9 @@
 #include "lvgl_port.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* On-screen diagnostics overlay (FR-5.1). Dev builds show it; a "release" build
@@ -33,6 +35,9 @@ constexpr int NUM_TABS = 3;
 const char* kNavText[NUM_TABS] = {"NODES", "CHAT", "RADIO"};
 const char* kNavIcon[NUM_TABS] = {LV_SYMBOL_LIST, LV_SYMBOL_KEYBOARD, LV_SYMBOL_WIFI};
 
+enum NodeSort { SORT_HEARD = 0, SORT_SNR = 1, SORT_HOPS = 2 };
+const char* kSortText[3] = {"Heard", "SNR", "Hops"};
+
 struct ShellState {
     lv_obj_t* nav[NUM_TABS]   = {};
     lv_obj_t* panel[NUM_TABS] = {};
@@ -45,8 +50,20 @@ struct ShellState {
     lv_obj_t* conn_lbl = nullptr;
     lv_obj_t* count_lbl = nullptr;
     lv_obj_t* diag_lbl = nullptr;   /* bottom diagnostics strip */
+
+    /* nodes tab */
+    lv_obj_t* nodes_list     = nullptr;
+    lv_obj_t* nodes_count    = nullptr;
+    lv_obj_t* sort_chip[3]   = {};
+    NodeSort  sort           = SORT_HEARD;
+    uint32_t  last_gen       = 0xffffffff;
+    NodeSort  last_sort      = SORT_HEARD;
+    int64_t   last_build_us  = 0;
 };
 ShellState S;
+
+/* scratch copy for rebuilds — file static so it never lands on a task stack */
+node_rec_t g_nodes[APP_MAX_NODES];
 
 /* ---- small style helpers ---- */
 
@@ -134,6 +151,144 @@ void set_tab(int i)
 
 void nav_cb(lv_event_t* e) { set_tab((int)(intptr_t)lv_event_get_user_data(e)); }
 
+/* ---- node rows ---- */
+
+/* Signal bucket → lit bar count + color (PRD §8). */
+void signal_bucket(float snr, int* bars, uint32_t* color)
+{
+    if (snr >= -5)       { *bars = 4; *color = C_GREEN; }
+    else if (snr >= -12) { *bars = 3; *color = C_GREEN; }
+    else if (snr >= -17) { *bars = 2; *color = C_AMBER; }
+    else                 { *bars = 1; *color = C_RED; }
+}
+
+/* Relative last-heard (no synced wall clock — PRD R2). */
+void fmt_age(int64_t age_us, char* out, size_t cap)
+{
+    long long s = age_us / 1000000;
+    if (s < 0) s = 0;
+    if      (s < 10)    snprintf(out, cap, "now");
+    else if (s < 60)    snprintf(out, cap, "%llds", s);
+    else if (s < 3600)  snprintf(out, cap, "%lldm", s / 60);
+    else if (s < 86400) snprintf(out, cap, "%lldh", s / 3600);
+    else                snprintf(out, cap, "%lldd", s / 86400);
+}
+
+int cmp_nodes(const void* a, const void* b)
+{
+    const node_rec_t* x = (const node_rec_t*)a;
+    const node_rec_t* y = (const node_rec_t*)b;
+    switch (S.sort) {
+    case SORT_SNR:
+        if (x->snr < y->snr) return 1;
+        if (x->snr > y->snr) return -1;
+        return 0;
+    case SORT_HOPS:
+        if (x->hops != y->hops) return x->hops - y->hops;        /* fewer first */
+        break;                                                   /* tie: by heard */
+    case SORT_HEARD:
+    default:
+        break;
+    }
+    /* default / tie-break: most-recently-heard first */
+    if (x->last_heard_us < y->last_heard_us) return 1;
+    if (x->last_heard_us > y->last_heard_us) return -1;
+    return 0;
+}
+
+void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us)
+{
+    lv_obj_t* row = box(parent, lv_pct(100), M_ROW_H);
+    flex_row(row);
+    lv_obj_set_style_pad_hor(row, 12, 0);
+    lv_obj_set_style_pad_column(row, 12, 0);
+    hairline_side(row, LV_BORDER_SIDE_BOTTOM);
+
+    /* badge */
+    lv_obj_t* badge = box(row, 46, 46);
+    bg(badge, C_SURF);
+    radius(badge, M_RAD_M);
+    const char* sn = (n->has_user && n->short_name[0]) ? n->short_name : "?";
+    lv_obj_center(label(badge, sn, FONT_BODY, n->has_user ? C_HI : C_MID));
+
+    /* name + id */
+    lv_obj_t* mid = box(row, 0, 46);
+    lv_obj_set_flex_grow(mid, 1);
+    flex_col(mid);
+    lv_obj_set_flex_align(mid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    label(mid, n->has_user ? n->long_name : "(unknown node)", FONT_ROW, C_HI);
+    char id[20];
+    snprintf(id, sizeof(id), "!%08lx", (unsigned long)n->num);
+    label(mid, id, FONT_META, C_DIM);
+
+    /* signal bars */
+    int bars; uint32_t scol;
+    signal_bucket(n->snr, &bars, &scol);
+    lv_obj_t* sig = box(row, 24, 20);
+    flex_row(sig);
+    lv_obj_set_flex_align(sig, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_set_style_pad_column(sig, 2, 0);
+    const int hgt[4] = {6, 9, 12, 16};
+    for (int b = 0; b < 4; b++) {
+        lv_obj_t* bar = box(sig, 4, hgt[b]);
+        bg(bar, b < bars ? scol : C_HAIRLINE);
+        radius(bar, 1);
+    }
+
+    /* numeric dB */
+    char snr[12];
+    snprintf(snr, sizeof(snr), "%.0f", (double)n->snr);
+    lv_obj_t* sl = label(row, snr, FONT_BODY, scol);
+    lv_obj_set_width(sl, 40);
+
+    /* hop pill */
+    lv_obj_t* pill = box(row, 0, 26);
+    lv_obj_set_width(pill, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_hor(pill, 9, 0);
+    radius(pill, M_RAD_PILL);
+    bg(pill, C_SURF);
+    flex_row(pill);
+    char hop[16];
+    if (n->hops == 0) snprintf(hop, sizeof(hop), "DIRECT");
+    else              snprintf(hop, sizeof(hop), "%d hops", n->hops);
+    lv_obj_center(label(pill, hop, FONT_META, n->hops == 0 ? C_GREEN : C_MID));
+
+    /* last heard */
+    char age[12];
+    fmt_age(now_us - n->last_heard_us, age, sizeof(age));
+    lv_obj_t* al = label(row, age, FONT_META, C_DIM);
+    lv_obj_set_width(al, 48);
+    lv_obj_set_style_text_align(al, LV_TEXT_ALIGN_RIGHT, 0);
+}
+
+void rebuild_nodes(int64_t now_us)
+{
+    if (!S.nodes_list) return;
+    uint32_t n = app_state_copy_nodes(g_nodes, APP_MAX_NODES);
+    qsort(g_nodes, n, sizeof(node_rec_t), cmp_nodes);
+
+    lv_obj_clean(S.nodes_list);
+    for (uint32_t i = 0; i < n; i++) add_node_row(S.nodes_list, &g_nodes[i], now_us);
+
+    if (S.nodes_count) {
+        char c[24];
+        snprintf(c, sizeof(c), "%lu heard", (unsigned long)n);
+        set_text(S.nodes_count, c);
+    }
+}
+
+void style_sort_chips(void)
+{
+    for (int i = 0; i < 3; i++)
+        set_color(S.sort_chip[i], i == (int)S.sort ? C_GREEN : C_DIM);
+}
+
+void sort_cb(lv_event_t* e)
+{
+    S.sort = (NodeSort)(intptr_t)lv_event_get_user_data(e);
+    style_sort_chips();   /* rebuild happens on the next refresh tick */
+}
+
 /* ---- snapshot refresh (LVGL task) ---- */
 
 void refresh_cb(lv_timer_t*)
@@ -174,6 +329,62 @@ void refresh_cb(lv_timer_t*)
         set_text(S.diag_lbl, line);
     }
 #endif
+
+    /* Rebuild the node list only on a meaningful change or a sort change — never
+     * on SNR jitter (FR-3.2). While the Nodes tab is visible, also rebuild every
+     * 3 s so the relative last-heard ages stay live. */
+    uint32_t gen   = app_state_nodes_gen();
+    int64_t  now   = esp_timer_get_time();
+    bool     view  = (S.active == 0);
+    bool     aged  = view && (now - S.last_build_us > 3000000);
+    if (gen != S.last_gen || S.sort != S.last_sort || aged) {
+        rebuild_nodes(now);
+        S.last_gen      = gen;
+        S.last_sort     = S.sort;
+        S.last_build_us = now;
+    }
+}
+
+/* The live Nodes tab: header (title + count + sort chips) over a scrolling list. */
+lv_obj_t* make_nodes_panel(lv_obj_t* parent)
+{
+    lv_obj_t* panel = box(parent, lv_pct(100), lv_pct(100));
+    flex_col(panel);
+
+    lv_obj_t* hdr = box(panel, lv_pct(100), 54);
+    flex_row(hdr);
+    lv_obj_set_style_pad_hor(hdr, 20, 0);
+    lv_obj_set_style_pad_column(hdr, 14, 0);
+    hairline_side(hdr, LV_BORDER_SIDE_BOTTOM);
+    label(hdr, "Mesh nodes", FONT_ROW, C_HI);
+    S.nodes_count = label(hdr, "0 heard", FONT_META, C_DIM);
+
+    lv_obj_t* spacer = box(hdr, 0, 1);
+    lv_obj_set_flex_grow(spacer, 1);
+
+    label(hdr, "sort", FONT_META, C_DIM);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* chip = box(hdr, 0, 30);
+        lv_obj_set_width(chip, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_hor(chip, 9, 0);
+        radius(chip, M_RAD_PILL);
+        bg(chip, C_SURF);
+        flex_row(chip);
+        lv_obj_add_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(chip, sort_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        S.sort_chip[i] = label(chip, kSortText[i], FONT_META, i == 0 ? C_GREEN : C_DIM);
+    }
+
+    lv_obj_t* list = box(panel, lv_pct(100), 0);
+    lv_obj_set_flex_grow(list, 1);
+    flex_col(list);
+    lv_obj_set_style_pad_hor(list, 8, 0);
+    lv_obj_set_style_pad_bottom(list, 12, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    S.nodes_list = list;
+
+    return panel;
 }
 
 /* A content panel: header title + centered milestone placeholder. */
@@ -283,7 +494,7 @@ void build_shell(void)
     lv_obj_set_flex_grow(content, 1);
     bg(content, C_BG);
 
-    S.panel[0] = make_panel(content, "Mesh nodes", "Live node list lands in M2");
+    S.panel[0] = make_nodes_panel(content);
     S.panel[1] = make_panel(content, "Primary  -  broadcast", "Chat lands in M4");
     S.panel[2] = make_panel(content, "Radio", "Onboarding / device picker lands in M5");
 

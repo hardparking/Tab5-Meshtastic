@@ -87,10 +87,6 @@ static uint32_t s_wc_id      = 0x2a;   /* incrementing want_config id          *
 /* diagnostics published to app_state */
 static diag_t   s_d;
 
-/* distinct nodes heard this sync (status-bar count; full node DB is M2) */
-static uint32_t s_seen[256];
-static uint32_t s_seen_n = 0;
-
 /* stall watchdog */
 static bool       s_have_peer  = false;
 static ble_addr_t s_peer_addr;
@@ -113,15 +109,6 @@ static void set_stage(conn_state_t state, const char* label)
 {
     app_state_set_conn(state, label);
     publish_diag();
-}
-
-static void note_node(uint32_t num)
-{
-    for (uint32_t i = 0; i < s_seen_n; i++)
-        if (s_seen[i] == num) return;
-    if (s_seen_n < (uint32_t)(sizeof(s_seen) / sizeof(s_seen[0])))
-        s_seen[s_seen_n++] = num;
-    app_state_set_node_count(s_seen_n);
 }
 
 /* ============================ Scan ============================ */
@@ -295,7 +282,8 @@ static void handle_event(const mesh_event_t* ev, uint16_t len)
         ESP_LOGI(TAG, "NodeInfo: 0x%08lx %s snr=%.1f hops=%d",
                  (unsigned long)n->num, n->has_user ? n->long_name : "(no user)",
                  n->snr, n->hops);
-        note_node(n->num);
+        app_state_upsert_node(n->num, n->long_name, n->short_name,
+                              n->snr, n->hops, n->has_user, esp_timer_get_time());
         if (n->num == s_my_num && n->has_user)
             app_state_set_myinfo(n->num, n->long_name, n->short_name);
         s_d.nodeinfo++;
@@ -442,11 +430,10 @@ static void reset_conn_state(void)
     s_mtu = 23; s_mtu_done = false; s_subscribed = false; s_drained = false;
     s_enc_done = false; s_ready = false; s_my_num = 0;
     s_read_pending = false;
-    s_seen_n = 0;
     s_progress_us = esp_timer_get_time(); s_prog_sig = 0;
     memset(&s_d, 0, sizeof(s_d));
     s_d.mtu = 23;
-    app_state_set_node_count(0);
+    app_state_clear_nodes();   /* fresh sync repopulates the DB */
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg)
