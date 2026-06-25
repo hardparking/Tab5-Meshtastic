@@ -1,0 +1,95 @@
+# ============================================================================
+# Tab5-Meshtastic v2 — host (ESP32-P4) sdkconfig defaults
+#
+# This file pins the known-good esp-hosted / esp_wifi_remote / NimBLE stack
+# (PRD §4) so the BLE transport added in M1 is purely additive. M0's firmware
+# brings up the board + display + LVGL shell only; it does NOT yet call
+# esp_hosted_init() / nimble_port_init(). The config below is carried verbatim
+# from the proven ../Tab5-Meshtastic build — do not "clean up" the SDIO pins or
+# the hosted-BT prerequisites; they are load-bearing.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32p4"
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# --- Flash / PSRAM (Tab5: 16MB flash, 32MB PSRAM) ---
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+
+# --- Partition table ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Console on the P4 native USB-Serial/JTAG ---
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# The LVGL render task is pinned to CPU1 and legitimately keeps it busy under
+# the board's PPA/direct-mode display path, which starves CPU1's idle task and
+# spams non-fatal task-watchdog warnings. CPU0's idle watchdog stays enabled to
+# catch real hangs in the app/BLE logic.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# --- LVGL fonts for the UI type scale (design: 13/16/18/26) ---
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_22=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=y
+
+# ============================================================================
+# esp-hosted: P4 <-> C6 over SDIO (values copied verbatim from the known-good
+# M5Tab5-UserDemo/platforms/tab5 config — do not change the pins).
+# ============================================================================
+CONFIG_ESP_HOSTED_ENABLED=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET="esp32c6"
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=15
+CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
+CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH=4
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=40000
+CONFIG_ESP_HOSTED_SDIO_PIN_CMD=13
+CONFIG_ESP_HOSTED_SDIO_PIN_CLK=12
+CONFIG_ESP_HOSTED_SDIO_PIN_D0=11
+# D1 in 4-bit mode is taken from the PRIV symbol, which defaults to 15 on the
+# P4 (collides with Slave_Reset=15!). Must set it to 10 explicitly.
+CONFIG_ESP_HOSTED_SDIO_PRIV_PIN_D1_4BIT_BUS=10
+CONFIG_ESP_HOSTED_SDIO_PIN_D1=10
+CONFIG_ESP_HOSTED_SDIO_PIN_D2=9
+CONFIG_ESP_HOSTED_SDIO_PIN_D3=8
+CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE=15
+CONFIG_ESP_HOSTED_RESET_GPIO_ACTIVE_LOW=y
+
+# esp_wifi_remote routes the Wi-Fi/BT radio to the hosted C6 slave.
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+
+# ============================================================================
+# Bluetooth: NimBLE host on the P4, controller is REMOTE (on the C6 via hosted).
+# These four are the hosted-BT prerequisites enforced by esp_hosted/Kconfig:
+#   BT enabled, NimBLE host, controller DISABLED, NimBLE UART transport OFF.
+# ============================================================================
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+CONFIG_BT_NIMBLE_CRYPTO_STACK_MBEDTLS=y
+
+# Route NimBLE's HCI to the hosted (C6) controller.
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+
+# We are a central talking to a Meshtastic radio peripheral.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+# CONFIG_BT_NIMBLE_ROLE_PERIPHERAL is not set
+# CONFIG_BT_NIMBLE_ROLE_BROADCASTER is not set
+
+# Bonding/SM — the radio requires an encrypted link (fixed PIN).
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_LEGACY=y
+CONFIG_BT_NIMBLE_SM_SC=y

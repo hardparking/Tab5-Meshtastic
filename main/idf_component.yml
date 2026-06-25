@@ -1,0 +1,17 @@
+## Component manager manifest for the Tab5-Meshtastic v2 host (ESP32-P4) app.
+##
+## The esp_hosted + esp_wifi_remote versions are PINNED to the known-good stack
+## from M5Tab5-UserDemo/platforms/tab5 (which drives the same C6 over SDIO).
+## esp_hosted 1.4.0 bundles the ESP32-C6 *slave* firmware (incl. Bluetooth HCI
+## over the hosted transport) — that is what gives the radio-less P4 a BLE
+## controller. They are pinned at M0 so the BLE transport in M1 is additive; M0
+## firmware does not yet initialize them.
+dependencies:
+  idf:
+    version: '>=5.3'
+  espressif/esp_hosted: '1.4.0'
+  espressif/esp_wifi_remote: '0.8.5'
+  # Tab5 board support — SYS I2C + PI4IOE5V6408 expander control (powers the C6
+  # via wlan_power before esp_hosted) plus the LCD/touch the UI renders on.
+  m5_tab5_component:
+    path: ../components/m5_tab5_component
