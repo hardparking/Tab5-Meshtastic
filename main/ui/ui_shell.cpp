@@ -1,18 +1,29 @@
 /*
- * Tab5-Meshtastic v2 — app shell (UI layer), M0.
+ * Tab5-Meshtastic v2 — app shell (UI layer).
  *
- * Static chrome: left rail (NODES / CHAT / RADIO), status bar, three empty
- * content panels with milestone placeholders. No live data and no BLE — the
- * backend layers land in M1+. All object creation runs under the LVGL lock.
+ * Static chrome (rail / status bar / content panels) plus a refresh timer that
+ * is the ONLY BLE→UI channel: it runs on the LVGL task, reads an immutable
+ * app_state snapshot, and updates the status chip / my-node badge / node count
+ * / diagnostics strip. The backend never touches LVGL (PRD §5).
  */
 
 #include "ui_shell.h"
 #include "theme.h"
+#include "app_state.h"
 
 #include "lvgl.h"
 #include "lvgl_port.h"
 
 #include <esp_log.h>
+#include <stdio.h>
+#include <string.h>
+
+/* On-screen diagnostics overlay (FR-5.1). Dev builds show it; a "release" build
+ * sets this to 0. Serial can't be attached without resetting the P4, so this is
+ * the primary observability surface (NFR-7). */
+#ifndef UI_DIAG_OVERLAY
+#define UI_DIAG_OVERLAY 1
+#endif
 
 namespace {
 
@@ -25,7 +36,15 @@ const char* kNavIcon[NUM_TABS] = {LV_SYMBOL_LIST, LV_SYMBOL_KEYBOARD, LV_SYMBOL_
 struct ShellState {
     lv_obj_t* nav[NUM_TABS]   = {};
     lv_obj_t* panel[NUM_TABS] = {};
-    int active                = 0;
+    int       active          = 0;
+
+    /* status-bar widgets driven by the snapshot */
+    lv_obj_t* my_badge = nullptr;
+    lv_obj_t* my_long  = nullptr;
+    lv_obj_t* my_id    = nullptr;
+    lv_obj_t* conn_lbl = nullptr;
+    lv_obj_t* count_lbl = nullptr;
+    lv_obj_t* diag_lbl = nullptr;   /* bottom diagnostics strip */
 };
 ShellState S;
 
@@ -79,6 +98,21 @@ void hairline_side(lv_obj_t* o, lv_border_side_t side)
     lv_obj_set_style_border_side(o, side, 0);
 }
 
+/* Update label text only when it actually changes — a no-op set still
+ * invalidates and churns redraws (NFR-3). */
+void set_text(lv_obj_t* l, const char* t)
+{
+    if (!l) return;
+    const char* cur = lv_label_get_text(l);
+    if (cur && strcmp(cur, t) == 0) return;
+    lv_label_set_text(l, t);
+}
+
+void set_color(lv_obj_t* l, uint32_t c)
+{
+    if (l) lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
+}
+
 /* ---- tab switching ---- */
 
 void set_tab(int i)
@@ -99,6 +133,48 @@ void set_tab(int i)
 }
 
 void nav_cb(lv_event_t* e) { set_tab((int)(intptr_t)lv_event_get_user_data(e)); }
+
+/* ---- snapshot refresh (LVGL task) ---- */
+
+void refresh_cb(lv_timer_t*)
+{
+    app_snapshot_t s;
+    app_state_snapshot(&s);
+
+    /* my-node badge + identity */
+    set_text(S.my_badge, s.my_short[0] ? s.my_short : "--");
+    set_text(S.my_long, s.my_long[0] ? s.my_long : "No device");
+    char id[20];
+    if (s.my_num) snprintf(id, sizeof(id), "!%08lx", (unsigned long)s.my_num);
+    else          snprintf(id, sizeof(id), "not connected");
+    set_text(S.my_id, id);
+
+    /* link-state chip */
+    bool linked = conn_is_linked(s.state);
+    set_text(S.conn_lbl, s.stage);
+    set_color(S.conn_lbl, linked ? C_GREEN : (s.state == CONN_READY ? C_GREEN : C_AMBER));
+
+    /* node count */
+    char cnt[12];
+    snprintf(cnt, sizeof(cnt), "%lu", (unsigned long)s.node_count);
+    set_text(S.count_lbl, cnt);
+
+#if UI_DIAG_OVERLAY
+    if (S.diag_lbl) {
+        const diag_t* d = &s.diag;
+        char wc = d->wc_acked ? 'Y' : (d->wc_sent ? 'q' : 'n');
+        char line[176];
+        snprintf(line, sizeof(line),
+                 "%s  mtu%u ci%u  rd%lu ni%lu df%lu nf%lu pl%lu rt%lu  su%c wc%c wr%lu err%d",
+                 s.stage, (unsigned)d->mtu, (unsigned)d->conn_itvl,
+                 (unsigned long)d->reads, (unsigned long)d->nodeinfo,
+                 (unsigned long)d->decfail, (unsigned long)d->notifies,
+                 (unsigned long)d->polls, (unsigned long)d->read_tmos,
+                 d->cccd_ok ? 'Y' : 'n', wc, (unsigned long)d->wc_retries, d->last_err);
+        set_text(S.diag_lbl, line);
+    }
+#endif
+}
 
 /* A content panel: header title + centered milestone placeholder. */
 lv_obj_t* make_panel(lv_obj_t* parent, const char* title, const char* hint)
@@ -171,18 +247,18 @@ void build_shell(void)
     lv_obj_t* mb = box(sb, 36, 36);
     bg(mb, C_SURF);
     radius(mb, M_RAD_S);
-    lv_obj_center(label(mb, "--", FONT_META, C_MID));
+    S.my_badge = label(mb, "--", FONT_META, C_MID);
+    lv_obj_center(S.my_badge);
 
     lv_obj_t* me = box(sb, 0, 40);
     lv_obj_set_width(me, LV_SIZE_CONTENT);
     flex_col(me);
-    label(me, "No device", FONT_META, C_HI);
-    label(me, "not connected", FONT_META, C_DIM);
+    S.my_long = label(me, "No device", FONT_META, C_HI);
+    S.my_id   = label(me, "not connected", FONT_META, C_DIM);
 
     lv_obj_t* spacer = box(sb, 0, 1);
     lv_obj_set_flex_grow(spacer, 1);
 
-    /* link-state chip — amber "NO DEVICE" until M1/M5 wire the real state */
     lv_obj_t* chip = box(sb, 0, 32);
     lv_obj_set_width(chip, LV_SIZE_CONTENT);
     flex_row(chip);
@@ -191,14 +267,14 @@ void build_shell(void)
     radius(chip, M_RAD_M);
     lv_obj_set_style_border_width(chip, 1, 0);
     lv_obj_set_style_border_color(chip, lv_color_hex(C_SURF), 0);
-    label(chip, "NO DEVICE", FONT_META, C_AMBER);
+    S.conn_lbl = label(chip, "BOOT", FONT_META, C_AMBER);
 
     lv_obj_t* cnt = box(sb, 0, 32);
     lv_obj_set_width(cnt, LV_SIZE_CONTENT);
     flex_row(cnt);
     lv_obj_set_style_pad_column(cnt, 7, 0);
     label(cnt, LV_SYMBOL_WIFI, FONT_META, C_MID);
-    label(cnt, "0", FONT_META, C_MID);
+    S.count_lbl = label(cnt, "0", FONT_META, C_MID);
 
     label(sb, "--:--", FONT_BODY, C_HI);
 
@@ -207,11 +283,25 @@ void build_shell(void)
     lv_obj_set_flex_grow(content, 1);
     bg(content, C_BG);
 
-    S.panel[0] = make_panel(content, "Mesh nodes", "Node sync lands in M1-M2");
+    S.panel[0] = make_panel(content, "Mesh nodes", "Live node list lands in M2");
     S.panel[1] = make_panel(content, "Primary  -  broadcast", "Chat lands in M4");
     S.panel[2] = make_panel(content, "Radio", "Onboarding / device picker lands in M5");
 
+#if UI_DIAG_OVERLAY
+    /* diagnostics strip pinned to the bottom of the main column */
+    lv_obj_t* diag = box(col, lv_pct(100), 22);
+    bg(diag, C_CHROME);
+    lv_obj_set_style_pad_hor(diag, 10, 0);
+    hairline_side(diag, LV_BORDER_SIDE_TOP);
+    S.diag_lbl = label(diag, "diag", FONT_META, C_DIM);
+    lv_obj_center(S.diag_lbl);
+#endif
+
     set_tab(0);
+
+    /* the BLE→UI snapshot pump (LVGL task) */
+    lv_timer_create(refresh_cb, 500, nullptr);
+
     ESP_LOGI(TAG, "shell built");
 }
 
