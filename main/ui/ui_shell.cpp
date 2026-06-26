@@ -1156,7 +1156,7 @@ void radio_refresh(void)
     if (S.radio_view == 0 && S.mgr_status) {
         app_snapshot_t s;
         app_state_snapshot(&s);
-        char line[48];
+        char line[64];
         if (s.state == CONN_READY)        snprintf(line, sizeof(line), "connected: %s", s.my_long);
         else if (s.state == CONN_NO_DEVICE) snprintf(line, sizeof(line), "no device");
         else                              snprintf(line, sizeof(line), "%s", s.stage);
@@ -1167,25 +1167,6 @@ void radio_refresh(void)
         uint32_t gen = app_state_scan_gen();
         if (gen != S.last_scan_gen) { rebuild_discovery(); S.last_scan_gen = gen; }
     }
-}
-
-/* A content panel: header title + centered milestone placeholder. */
-lv_obj_t* make_panel(lv_obj_t* parent, const char* title, const char* hint)
-{
-    lv_obj_t* panel = box(parent, lv_pct(100), lv_pct(100));
-    flex_col(panel);
-
-    lv_obj_t* hdr = box(panel, lv_pct(100), 54);
-    flex_row(hdr);
-    lv_obj_set_style_pad_hor(hdr, 20, 0);
-    hairline_side(hdr, LV_BORDER_SIDE_BOTTOM);
-    label(hdr, title, FONT_ROW, C_HI);
-
-    lv_obj_t* body = box(panel, lv_pct(100), 0);
-    lv_obj_set_flex_grow(body, 1);
-    lv_obj_t* h = label(body, hint, FONT_BODY, C_DIM);
-    lv_obj_center(h);
-    return panel;
 }
 
 void build_shell(void)

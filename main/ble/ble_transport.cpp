@@ -360,7 +360,7 @@ static void handle_event(const mesh_event_t* ev, uint16_t len)
             saved_device_t dev;
             memset(&dev, 0, sizeof(dev));
             memcpy(dev.addr, s_target.addr, 6);
-            strncpy(dev.name, s_target.name[0] ? s_target.name : kDefaultName, sizeof(dev.name) - 1);
+            strncpy(dev.name, s_target.name[0] ? s_target.name : kScanNamePrefix, sizeof(dev.name) - 1);
             snprintf(dev.pin, sizeof(dev.pin), "%06lu", (unsigned long)s_target.pin);
             settings_set_active(&dev);
             s_target.saved = true;
