@@ -10,6 +10,7 @@
 #include "ui_shell.h"
 #include "theme.h"
 #include "app_state.h"
+#include "settings.h"
 #include "ble_transport.h"
 
 #include "lvgl.h"
@@ -82,6 +83,19 @@ struct ShellState {
     lv_obj_t* chat_input = nullptr;   /* composer textarea       */
     lv_obj_t* chat_kb    = nullptr;   /* on-screen keyboard      */
     uint32_t  msg_seen   = 0;         /* bubbles already rendered */
+
+    /* radio tab — onboarding / device picker */
+    lv_obj_t* v_manager  = nullptr;   /* saved devices + scan button */
+    lv_obj_t* v_disco    = nullptr;   /* discovery scan list         */
+    lv_obj_t* v_pin      = nullptr;   /* PIN keypad                  */
+    lv_obj_t* mgr_list   = nullptr;
+    lv_obj_t* mgr_status = nullptr;
+    lv_obj_t* disco_list = nullptr;
+    lv_obj_t* pin_disp   = nullptr;
+    int       radio_view = 0;         /* 0 manager, 1 discovery, 2 pin */
+    uint8_t   pin_addr[6] = {};
+    char      pin_buf[8]  = {};
+    uint32_t  last_scan_gen = 0xffffffff;
 };
 ShellState S;
 
@@ -100,6 +114,12 @@ struct NodeRow {
 };
 NodeRow  g_rows[APP_MAX_NODES];
 uint32_t g_row_n = 0;
+
+/* UI-side copies for the radio tab (index → addr lookups for row callbacks) */
+saved_device_t g_mgr[SETTINGS_MAX_SAVED];
+uint32_t       g_mgr_n = 0;
+scan_result_t  g_disco[APP_MAX_SCAN];
+uint32_t       g_disco_n = 0;
 
 /* ---- small style helpers ---- */
 
@@ -134,11 +154,15 @@ lv_obj_t* label(lv_obj_t* parent, const char* t, const lv_font_t* f, uint32_t c)
     return l;
 }
 
-/* forward decls: detail view + chat (defined after the nodes panel) */
+/* forward decls: detail view + chat + radio (defined after the nodes panel) */
 void open_detail(uint32_t num);
 void close_detail(void);
 void populate_detail(void);
 void append_messages(void);
+void radio_refresh(void);
+void rebuild_manager(void);
+void rebuild_discovery(void);
+void radio_show(int view);
 
 void flex_row(lv_obj_t* o)
 {
@@ -193,6 +217,7 @@ void set_tab(int i)
             lv_obj_set_style_bg_opa(S.nav[t], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         }
     }
+    if (i == 2 && S.v_manager) radio_show(0);   /* land on the device manager */
 }
 
 void nav_cb(lv_event_t* e) { set_tab((int)(intptr_t)lv_event_get_user_data(e)); }
@@ -446,6 +471,9 @@ void refresh_cb(lv_timer_t*)
 
     /* chat: append any newly-arrived messages (snappy path, FR-4.3) */
     append_messages();
+
+    /* radio tab: live status + discovery results */
+    if (S.active == 2) radio_refresh();
 }
 
 /* The live Nodes tab: header (title + count + sort chips) over a scrolling list. */
@@ -845,6 +873,302 @@ lv_obj_t* make_chat_panel(lv_obj_t* parent)
     return panel;
 }
 
+/* ---- radio tab: onboarding / device picker (PRD §6.1) ---- */
+
+void fmt_addr(const uint8_t a[6], char* out, size_t cap)
+{
+    snprintf(out, cap, "%02x:%02x:%02x:%02x:%02x:%02x", a[5], a[4], a[3], a[2], a[1], a[0]);
+}
+
+/* A pill button. user_data passed to the click handler. */
+lv_obj_t* make_btn(lv_obj_t* parent, const char* text, lv_event_cb_t cb, void* ud,
+                   uint32_t bgc, uint32_t txtc, int w, int h)
+{
+    lv_obj_t* b = box(parent, w, h);
+    bg(b, bgc);
+    radius(b, M_RAD_M);
+    flex_row(b);
+    lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (cb) {
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+    }
+    lv_obj_center(label(b, text, FONT_ROW, txtc));
+    return b;
+}
+
+void radio_show(int view)
+{
+    S.radio_view = view;
+    if (S.v_manager) (view == 0 ? lv_obj_clear_flag : lv_obj_add_flag)(S.v_manager, LV_OBJ_FLAG_HIDDEN);
+    if (S.v_disco)   (view == 1 ? lv_obj_clear_flag : lv_obj_add_flag)(S.v_disco, LV_OBJ_FLAG_HIDDEN);
+    if (S.v_pin)     (view == 2 ? lv_obj_clear_flag : lv_obj_add_flag)(S.v_pin, LV_OBJ_FLAG_HIDDEN);
+    if (view == 0) rebuild_manager();
+    else if (view == 1) rebuild_discovery();
+}
+
+/* ---- manager ---- */
+
+void mgr_connect_cb(lv_event_t* e)
+{
+    uint32_t i = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    if (i < g_mgr_n) ble_transport_connect(g_mgr[i].addr, (uint32_t)atoi(g_mgr[i].pin));
+    radio_show(0);
+}
+
+void mgr_forget_cb(lv_event_t* e)
+{
+    uint32_t i = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    if (i < g_mgr_n) ble_transport_forget(g_mgr[i].addr);
+    rebuild_manager();
+}
+
+void scan_btn_cb(lv_event_t*)
+{
+    ble_transport_scan();
+    radio_show(1);
+}
+
+void rebuild_manager(void)
+{
+    if (!S.mgr_list) return;
+    lv_obj_clean(S.mgr_list);
+    g_mgr_n = settings_get_saved(g_mgr, SETTINGS_MAX_SAVED);
+
+    saved_device_t active;
+    bool have_active = settings_get_active(&active);
+
+    if (g_mgr_n == 0) {
+        lv_obj_t* w = label(S.mgr_list, "No saved radios.\nTap \"Scan for devices\" to add one.",
+                            FONT_BODY, C_DIM);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(w);
+        return;
+    }
+
+    for (uint32_t i = 0; i < g_mgr_n; i++) {
+        bool is_active = have_active && memcmp(active.addr, g_mgr[i].addr, 6) == 0;
+
+        lv_obj_t* row = box(S.mgr_list, lv_pct(100), 64);
+        flex_row(row);
+        lv_obj_set_style_pad_hor(row, 12, 0);
+        lv_obj_set_style_pad_column(row, 10, 0);
+        hairline_side(row, LV_BORDER_SIDE_BOTTOM);
+
+        lv_obj_t* col = box(row, 0, 48);
+        lv_obj_set_flex_grow(col, 1);
+        flex_col(col);
+        lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        label(col, g_mgr[i].name[0] ? g_mgr[i].name : "Meshtastic", FONT_ROW, C_HI);
+        char ad[20]; fmt_addr(g_mgr[i].addr, ad, sizeof(ad));
+        label(col, ad, FONT_META, C_DIM);
+
+        if (is_active)
+            make_btn(row, "Active", nullptr, nullptr, C_SURF, C_GREEN, 90, 40);
+        else
+            make_btn(row, "Connect", mgr_connect_cb, (void*)(intptr_t)i, C_GREEN, C_INK, 96, 40);
+        make_btn(row, "Forget", mgr_forget_cb, (void*)(intptr_t)i, C_SURF, C_RED, 84, 40);
+    }
+}
+
+/* ---- discovery ---- */
+
+void disco_row_cb(lv_event_t* e)
+{
+    uint32_t i = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    if (i >= g_disco_n) return;
+    char pin[8];
+    if (g_disco[i].saved && settings_is_saved(g_disco[i].addr, pin)) {
+        ble_transport_connect(g_disco[i].addr, (uint32_t)atoi(pin));
+        radio_show(0);
+    } else {
+        memcpy(S.pin_addr, g_disco[i].addr, 6);
+        S.pin_buf[0] = 0;
+        radio_show(2);
+    }
+}
+
+void rescan_cb(lv_event_t*) { ble_transport_scan(); rebuild_discovery(); }
+void disco_back_cb(lv_event_t*) { radio_show(0); }
+
+void rebuild_discovery(void)
+{
+    if (!S.disco_list) return;
+    lv_obj_clean(S.disco_list);
+    g_disco_n = app_state_copy_scan(g_disco, APP_MAX_SCAN);
+
+    if (g_disco_n == 0) {
+        lv_obj_t* w = label(S.disco_list, "Scanning for Meshtastic radios...", FONT_BODY, C_DIM);
+        lv_obj_center(w);
+        return;
+    }
+
+    for (uint32_t i = 0; i < g_disco_n; i++) {
+        lv_obj_t* row = box(S.disco_list, lv_pct(100), 60);
+        flex_row(row);
+        lv_obj_set_style_pad_hor(row, 12, 0);
+        lv_obj_set_style_pad_column(row, 10, 0);
+        hairline_side(row, LV_BORDER_SIDE_BOTTOM);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, disco_row_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+        lv_obj_t* col = box(row, 0, 46);
+        lv_obj_set_flex_grow(col, 1);
+        flex_col(col);
+        lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        label(col, g_disco[i].name, FONT_ROW, C_HI);
+        char ad[20]; fmt_addr(g_disco[i].addr, ad, sizeof(ad));
+        label(col, ad, FONT_META, C_DIM);
+
+        if (g_disco[i].saved) {
+            lv_obj_t* pill = box(row, 0, 26);
+            lv_obj_set_width(pill, LV_SIZE_CONTENT);
+            lv_obj_set_style_pad_hor(pill, 9, 0);
+            radius(pill, M_RAD_PILL);
+            bg(pill, C_SURF);
+            flex_row(pill);
+            lv_obj_center(label(pill, "paired", FONT_META, C_GREEN));
+        }
+        char rs[12]; snprintf(rs, sizeof(rs), "%d", g_disco[i].rssi);
+        label(row, rs, FONT_META, C_MID);
+    }
+}
+
+/* ---- PIN keypad ---- */
+
+void update_pin_disp(void)
+{
+    char d[8];
+    size_t len = strlen(S.pin_buf);
+    for (int i = 0; i < 6; i++) d[i] = i < (int)len ? S.pin_buf[i] : '_';
+    d[6] = 0;
+    set_text(S.pin_disp, d);
+}
+
+void key_cb(lv_event_t* e)
+{
+    int v = (int)(intptr_t)lv_event_get_user_data(e);
+    size_t len = strlen(S.pin_buf);
+    if (v == 10) {                       /* backspace */
+        if (len) S.pin_buf[len - 1] = 0;
+    } else if (len < 6) {                /* digit */
+        S.pin_buf[len] = (char)('0' + v);
+        S.pin_buf[len + 1] = 0;
+    }
+    update_pin_disp();
+}
+
+void pin_connect_cb(lv_event_t*)
+{
+    if (S.pin_buf[0]) {
+        ble_transport_connect(S.pin_addr, (uint32_t)atoi(S.pin_buf));
+        radio_show(0);
+    }
+}
+
+void pin_cancel_cb(lv_event_t*) { radio_show(1); }
+
+lv_obj_t* make_radio_panel(lv_obj_t* parent)
+{
+    lv_obj_t* panel = box(parent, lv_pct(100), lv_pct(100));
+    bg(panel, C_BG);
+
+    /* --- manager view --- */
+    lv_obj_t* mgr = box(panel, lv_pct(100), lv_pct(100));
+    flex_col(mgr);
+    S.v_manager = mgr;
+    lv_obj_t* mh = box(mgr, lv_pct(100), 54);
+    flex_row(mh);
+    lv_obj_set_style_pad_hor(mh, 20, 0);
+    lv_obj_set_style_pad_column(mh, 12, 0);
+    hairline_side(mh, LV_BORDER_SIDE_BOTTOM);
+    label(mh, "Radios", FONT_ROW, C_HI);
+    S.mgr_status = label(mh, "", FONT_META, C_DIM);
+    lv_obj_t* mlist = box(mgr, lv_pct(100), 0);
+    lv_obj_set_flex_grow(mlist, 1);
+    flex_col(mlist);
+    lv_obj_set_style_pad_hor(mlist, 8, 0);
+    lv_obj_add_flag(mlist, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(mlist, LV_DIR_VER);
+    S.mgr_list = mlist;
+    lv_obj_t* mfoot = box(mgr, lv_pct(100), 72);
+    flex_row(mfoot);
+    lv_obj_set_flex_align(mfoot, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    make_btn(mfoot, "Scan for devices", scan_btn_cb, nullptr, C_GREEN, C_INK, 260, 48);
+
+    /* --- discovery view --- */
+    lv_obj_t* dv = box(panel, lv_pct(100), lv_pct(100));
+    flex_col(dv);
+    lv_obj_add_flag(dv, LV_OBJ_FLAG_HIDDEN);
+    S.v_disco = dv;
+    lv_obj_t* dh = box(dv, lv_pct(100), 54);
+    flex_row(dh);
+    lv_obj_set_style_pad_hor(dh, 16, 0);
+    lv_obj_set_style_pad_column(dh, 10, 0);
+    hairline_side(dh, LV_BORDER_SIDE_BOTTOM);
+    make_btn(dh, LV_SYMBOL_LEFT, disco_back_cb, nullptr, C_SURF, C_HI, 44, 40);
+    label(dh, "Discover", FONT_ROW, C_HI);
+    lv_obj_t* dsp = box(dh, 0, 1); lv_obj_set_flex_grow(dsp, 1);
+    make_btn(dh, "Rescan", rescan_cb, nullptr, C_SURF, C_HI, 96, 40);
+    lv_obj_t* dlist = box(dv, lv_pct(100), 0);
+    lv_obj_set_flex_grow(dlist, 1);
+    flex_col(dlist);
+    lv_obj_set_style_pad_hor(dlist, 8, 0);
+    lv_obj_add_flag(dlist, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(dlist, LV_DIR_VER);
+    S.disco_list = dlist;
+
+    /* --- PIN view --- */
+    lv_obj_t* pv = box(panel, lv_pct(100), lv_pct(100));
+    flex_col(pv);
+    lv_obj_set_flex_align(pv, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(pv, 16, 0);
+    lv_obj_add_flag(pv, LV_OBJ_FLAG_HIDDEN);
+    S.v_pin = pv;
+    label(pv, "Enter PIN", FONT_ROW, C_HI);
+    S.pin_disp = label(pv, "______", FONT_TITLE, C_GREEN);
+    lv_obj_t* pad = box(pv, 304, 248);
+    lv_obj_set_flex_flow(pad, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(pad, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(pad, 4, 0);
+    static const char* kDigit[10] = {"0","1","2","3","4","5","6","7","8","9"};
+    const int order[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, -1};
+    for (int k = 0; k < 12; k++) {
+        int v = order[k];
+        if (v == -1) { box(pad, 92, 52); continue; }   /* spacer */
+        const char* lbl = (v == 10) ? LV_SYMBOL_BACKSPACE : kDigit[v];
+        make_btn(pad, lbl, key_cb, (void*)(intptr_t)v, C_SURF, C_HI, 92, 52);
+    }
+    lv_obj_t* pf = box(pv, 304, 52);
+    flex_row(pf);
+    lv_obj_set_flex_align(pf, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(pf, 10, 0);
+    make_btn(pf, "Cancel", pin_cancel_cb, nullptr, C_SURF, C_HI, 140, 48);
+    make_btn(pf, "Connect", pin_connect_cb, nullptr, C_GREEN, C_INK, 140, 48);
+
+    radio_show(0);
+    return panel;
+}
+
+void radio_refresh(void)
+{
+    /* manager status line */
+    if (S.radio_view == 0 && S.mgr_status) {
+        app_snapshot_t s;
+        app_state_snapshot(&s);
+        char line[48];
+        if (s.state == CONN_READY)        snprintf(line, sizeof(line), "connected: %s", s.my_long);
+        else if (s.state == CONN_NO_DEVICE) snprintf(line, sizeof(line), "no device");
+        else                              snprintf(line, sizeof(line), "%s", s.stage);
+        set_text(S.mgr_status, line);
+    }
+    /* discovery list refresh as new adverts arrive */
+    if (S.radio_view == 1) {
+        uint32_t gen = app_state_scan_gen();
+        if (gen != S.last_scan_gen) { rebuild_discovery(); S.last_scan_gen = gen; }
+    }
+}
+
 /* A content panel: header title + centered milestone placeholder. */
 lv_obj_t* make_panel(lv_obj_t* parent, const char* title, const char* hint)
 {
@@ -954,7 +1278,7 @@ void build_shell(void)
 
     S.panel[0] = make_nodes_panel(content);
     S.panel[1] = make_chat_panel(content);
-    S.panel[2] = make_panel(content, "Radio", "Onboarding / device picker lands in M5");
+    S.panel[2] = make_radio_panel(content);
     S.detail   = make_detail_panel(content);   /* overlays the content area */
 
 #if UI_DIAG_OVERLAY

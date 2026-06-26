@@ -27,6 +27,21 @@ void ble_transport_start(void);
  * not connected. */
 void ble_transport_send_text(const char* text);
 
+/* ---- onboarding / device-picker commands (PRD §6.1) ---- */
+
+/* Start a discovery scan: report Meshtastic adverts into app_state's scan list
+ * (does not connect). */
+void ble_transport_scan(void);
+
+/* Connect to a specific device with the given numeric PIN, bond, and (on a
+ * clean sync) persist it as the active device. Switches away from any current
+ * connection. */
+void ble_transport_connect(const uint8_t addr[6], uint32_t pin);
+
+/* Forget a saved device: drop its bond and remove it from settings. If it is
+ * the active device, disconnect. */
+void ble_transport_forget(const uint8_t addr[6]);
+
 #ifdef __cplusplus
 }
 #endif

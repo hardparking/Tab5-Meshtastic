@@ -37,22 +37,22 @@ extern "C" void ble_store_config_init(void);
 
 static const char* TAG = "ble";
 
-/* ---- Default/bootstrap target: M5Stack Unit C6L (PRD §4 reference node) ----
- * BLE name "Meshtastic_0be4", addr XX:XX:XX:XX:XX:XX, PIN 123456. Used only
- * until a device is saved in NVS; Slice B's device picker replaces it and the
- * onboarding UI removes the implicit default. */
-static const char*    kDefaultName  = "Meshtastic";  /* prefix match */
-static const uint8_t  kDefaultAddr[6] = {0xe6, 0x0b, 0x50, 0x81, 0x8c, 0x58};  /* little-endian */
-static const uint32_t kDefaultPin   = 123456;
+/* Only Meshtastic radios are offered in discovery (name-prefix filter). There is
+ * no hardcoded connection target — the active device comes from NVS / the picker. */
+static const char* kScanNamePrefix = "Meshtastic";
 
-/* The radio we are (re)connecting to. Loaded from saved settings at start, else
- * seeded with the default above. addr is the advertised address we match/scan. */
+/* Scan mode: what the GAP discovery callback does with adverts. */
+enum scan_mode_t { MODE_IDLE, MODE_DISCOVERY, MODE_CONNECT };
+static scan_mode_t s_mode = MODE_IDLE;
+
+/* The radio we are (re)connecting to (CONNECT mode). addr is the advertised
+ * address we match/scan. */
 static struct {
     uint8_t  addr[6];
     uint32_t pin;
     char     name[32];
-    bool     from_nvs;   /* came from saved settings (vs the default seed) */
-    bool     saved;      /* already persisted this session                 */
+    bool     have;       /* a target is set                 */
+    bool     saved;      /* already persisted this session  */
 } s_target;
 
 /* ---- Meshtastic GATT UUIDs (128-bit, little-endian byte order) ---- */
@@ -144,24 +144,32 @@ static void start_scan(void)
 
 static bool advert_is_target(const struct ble_gap_disc_desc* d)
 {
-    bool match = memcmp(d->addr.val, s_target.addr, 6) == 0;
-
-    struct ble_hs_adv_fields f;
-    bool parsed = ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0;
-
-    /* Before anything is saved, also accept any "Meshtastic*" radio by name so a
-     * fresh unit still bootstraps. */
-    if (!match && !s_target.from_nvs && parsed && f.name && f.name_len &&
-        strncmp((const char*)f.name, kDefaultName, strlen(kDefaultName)) == 0)
-        match = true;
-
+    if (memcmp(d->addr.val, s_target.addr, 6) != 0) return false;
     /* capture the advertised name so we can persist a friendly label */
-    if (match && parsed && f.name && f.name_len) {
+    struct ble_hs_adv_fields f;
+    if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0 && f.name && f.name_len) {
         size_t n = f.name_len < sizeof(s_target.name) - 1 ? f.name_len : sizeof(s_target.name) - 1;
         memcpy(s_target.name, f.name, n);
         s_target.name[n] = 0;
     }
-    return match;
+    return true;
+}
+
+/* Discovery: report a Meshtastic advert into app_state's scan list. */
+static void report_advert(const struct ble_gap_disc_desc* d)
+{
+    struct ble_hs_adv_fields f;
+    if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) != 0) return;
+    if (!f.name || !f.name_len) return;
+    if (strncmp((const char*)f.name, kScanNamePrefix, strlen(kScanNamePrefix)) != 0) return;
+
+    char name[32];
+    size_t n = f.name_len < sizeof(name) - 1 ? f.name_len : sizeof(name) - 1;
+    memcpy(name, f.name, n);
+    name[n] = 0;
+
+    bool saved = settings_is_saved(d->addr.val, nullptr);
+    app_state_add_scan(d->addr.val, name, d->rssi, saved);
 }
 
 /* ====================== ToRadio writes ======================= */
@@ -510,7 +518,8 @@ static int gap_event(struct ble_gap_event* event, void* arg)
 {
     switch (event->type) {
     case BLE_GAP_EVENT_DISC: {
-        if (!advert_is_target(&event->disc)) return 0;
+        if (s_mode == MODE_DISCOVERY) { report_advert(&event->disc); return 0; }
+        if (s_mode != MODE_CONNECT || !advert_is_target(&event->disc)) return 0;
         ESP_LOGI(TAG, ">>> found radio, rssi=%d — connecting", event->disc.rssi);
         memcpy(s_target.addr, event->disc.addr.val, 6);   /* lock onto this address */
         ble_gap_disc_cancel();
@@ -611,13 +620,17 @@ static int gap_event(struct ble_gap_event* event, void* arg)
     }
 
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGW(TAG, "disconnected reason=%d; rescanning", event->disconnect.reason);
+        ESP_LOGW(TAG, "disconnected reason=%d", event->disconnect.reason);
         if (s_poll_timer) esp_timer_stop(s_poll_timer);
         s_read_pending = false;
         s_drained      = false;
-        set_stage(CONN_DISCONNECTED, "DISCONNECTED");
         memset(&s_conn, 0, sizeof(s_conn));
-        start_scan();
+        if (s_mode == MODE_CONNECT && s_target.have) {
+            set_stage(CONN_DISCONNECTED, "DISCONNECTED");
+            start_scan();   /* auto-reconnect to the active device */
+        } else {
+            set_stage(CONN_NO_DEVICE, "NO DEVICE");
+        }
         return 0;
 
     default:
@@ -631,7 +644,13 @@ static void on_sync(void)
 {
     if (ble_hs_util_ensure_addr(0) != 0) { ESP_LOGE(TAG, "no BLE addr"); return; }
     ESP_LOGI(TAG, "BLE host synced; MTU pref=%d", ble_att_preferred_mtu());
-    start_scan();
+    if (s_target.have) {        /* saved device → auto-connect (FR-1.6) */
+        s_mode = MODE_CONNECT;
+        start_scan();
+    } else {                    /* nothing saved → onboarding welcome (FR-1.1) */
+        s_mode = MODE_IDLE;
+        set_stage(CONN_NO_DEVICE, "NO DEVICE");
+    }
 }
 
 static void on_reset(int reason) { ESP_LOGW(TAG, "BLE host reset; reason=%d", reason); }
@@ -643,25 +662,80 @@ static void host_task(void*)
     nimble_port_freertos_deinit();
 }
 
+/* ===================== onboarding commands ==================== */
+
+void ble_transport_scan(void)
+{
+    s_mode = MODE_DISCOVERY;
+    app_state_clear_scan();
+    ble_gap_disc_cancel();   /* stop any prior scan */
+
+    uint8_t own;
+    if (ble_hs_id_infer_auto(0, &own) != 0) return;
+    struct ble_gap_disc_params disc = {};
+    disc.passive           = 0;   /* active: pull scan-response for the name */
+    disc.filter_duplicates = 1;
+    int rc = ble_gap_disc(own, BLE_HS_FOREVER, &disc, gap_event, NULL);
+    ESP_LOGI(TAG, "discovery scan rc=%d", rc);
+}
+
+void ble_transport_connect(const uint8_t addr[6], uint32_t pin)
+{
+    memcpy(s_target.addr, addr, 6);
+    s_target.pin     = pin;
+    s_target.name[0] = 0;        /* captured from the advert on match */
+    s_target.have    = true;
+    s_target.saved   = false;    /* (re)persist on a clean sync       */
+    s_mode = MODE_CONNECT;
+    app_state_clear_scan();
+    ble_gap_disc_cancel();
+    ESP_LOGI(TAG, "connect to %02x:%02x:%02x:%02x:%02x:%02x",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    if (s_conn.conn_handle) {
+        /* drop the current link; the DISCONNECT handler reconnects to the new
+         * target since s_mode is CONNECT. */
+        ble_gap_terminate(s_conn.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    } else {
+        start_scan();
+    }
+}
+
+void ble_transport_forget(const uint8_t addr[6])
+{
+    bool was_active = s_target.have && memcmp(s_target.addr, addr, 6) == 0;
+    settings_forget(addr);
+
+    ble_addr_t ba;
+    ba.type = BLE_ADDR_PUBLIC;
+    memcpy(ba.val, addr, 6);
+    ble_gap_unpair(&ba);   /* drop the bond (best-effort) */
+
+    if (was_active) {
+        s_target.have = false;
+        s_mode        = MODE_IDLE;
+        if (s_conn.conn_handle)
+            ble_gap_terminate(s_conn.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        else
+            set_stage(CONN_NO_DEVICE, "NO DEVICE");
+    }
+}
+
 void ble_transport_start(void)
 {
     s_d.mtu = 23;
 
-    /* Load the (re)connect target: a saved device if one exists (auto-connect,
-     * FR-1.6), else the default test node as a bootstrap. */
+    /* Load the auto-connect target from saved settings, if any (FR-1.6). With
+     * none, we stay in onboarding (welcome) until the user picks a device. */
     saved_device_t dev;
     if (settings_get_active(&dev)) {
         memcpy(s_target.addr, dev.addr, 6);
-        s_target.pin      = (uint32_t)atoi(dev.pin);
+        s_target.pin  = (uint32_t)atoi(dev.pin);
         strncpy(s_target.name, dev.name, sizeof(s_target.name) - 1);
-        s_target.from_nvs = true;
+        s_target.have = true;
         ESP_LOGI(TAG, "auto-connect target from NVS: %s", dev.name);
     } else {
-        memcpy(s_target.addr, kDefaultAddr, 6);
-        s_target.pin      = kDefaultPin;
-        s_target.name[0]  = 0;
-        s_target.from_nvs = false;
-        ESP_LOGI(TAG, "no saved device — using default test node");
+        s_target.have = false;
+        ESP_LOGI(TAG, "no saved device — onboarding");
     }
     s_target.saved = false;
 

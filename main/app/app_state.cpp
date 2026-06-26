@@ -23,6 +23,9 @@ struct AppState {
     uint32_t          nodes_gen;
     msg_rec_t         msgs[APP_MAX_MSGS];   /* ring buffer */
     uint32_t          msg_total;            /* monotonic count ever appended */
+    scan_result_t     scan[APP_MAX_SCAN];
+    uint32_t          scan_n;
+    uint32_t          scan_gen;
 };
 
 AppState g;
@@ -186,6 +189,50 @@ uint32_t app_state_copy_messages(msg_rec_t* out, uint32_t max)
     uint32_t first = g.msg_total - n;   /* monotonic index of first to copy */
     for (uint32_t i = 0; i < n; i++)
         out[i] = g.msgs[(first + i) % APP_MAX_MSGS];
+    unlock();
+    return n;
+}
+
+void app_state_clear_scan(void)
+{
+    lock();
+    g.scan_n = 0;
+    g.scan_gen++;
+    unlock();
+}
+
+void app_state_add_scan(const uint8_t addr[6], const char* name, int rssi, bool saved)
+{
+    lock();
+    scan_result_t* r = nullptr;
+    for (uint32_t i = 0; i < g.scan_n; i++)
+        if (memcmp(g.scan[i].addr, addr, 6) == 0) { r = &g.scan[i]; break; }
+    if (!r) {
+        if (g.scan_n >= APP_MAX_SCAN) { unlock(); return; }
+        r = &g.scan[g.scan_n++];
+        memset(r, 0, sizeof(*r));
+        memcpy(r->addr, addr, 6);
+        g.scan_gen++;   /* new device — list changed */
+    }
+    if (name && name[0]) copy_str(r->name, sizeof(r->name), name);
+    r->rssi  = (int8_t)rssi;
+    r->saved = saved;
+    unlock();
+}
+
+uint32_t app_state_scan_gen(void)
+{
+    lock();
+    uint32_t gen = g.scan_gen;
+    unlock();
+    return gen;
+}
+
+uint32_t app_state_copy_scan(scan_result_t* out, uint32_t max)
+{
+    lock();
+    uint32_t n = g.scan_n < max ? g.scan_n : max;
+    memcpy(out, g.scan, n * sizeof(scan_result_t));
     unlock();
     return n;
 }

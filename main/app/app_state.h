@@ -25,6 +25,7 @@ extern "C" {
  * until M5. */
 typedef enum {
     CONN_BOOT = 0,
+    CONN_NO_DEVICE,     /* nothing saved — onboarding welcome */
     CONN_SCANNING,
     CONN_CONNECTING,
     CONN_PAIRING,       /* bonding / PIN exchange */
@@ -134,6 +135,21 @@ uint32_t app_state_msg_total(void);
 /* Copy up to `max` of the most recent messages into out[] (oldest first).
  * Returns the count copied. */
 uint32_t app_state_copy_messages(msg_rec_t* out, uint32_t max);
+
+/* ---- discovery scan results (PRD §6.1 FR-1.2) ---- */
+#define APP_MAX_SCAN 24
+
+typedef struct {
+    uint8_t addr[6];
+    char    name[32];
+    int8_t  rssi;
+    bool    saved;     /* already in our saved list (the "paired" tag) */
+} scan_result_t;
+
+void     app_state_clear_scan(void);
+void     app_state_add_scan(const uint8_t addr[6], const char* name, int rssi, bool saved);
+uint32_t app_state_scan_gen(void);
+uint32_t app_state_copy_scan(scan_result_t* out, uint32_t max);
 
 /* ---- readers (called from the UI/LVGL task) ---- */
 void app_state_snapshot(app_snapshot_t* out);

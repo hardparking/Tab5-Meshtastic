@@ -91,6 +91,17 @@ uint32_t settings_get_saved(saved_device_t* out, uint32_t max)
     return n;
 }
 
+bool settings_is_saved(const uint8_t addr[6], char* pin_out)
+{
+    for (uint32_t i = 0; i < s_saved_n; i++) {
+        if (addr_eq(s_saved[i].addr, addr)) {
+            if (pin_out) strcpy(pin_out, s_saved[i].pin);
+            return true;
+        }
+    }
+    return false;
+}
+
 void settings_forget(const uint8_t addr[6])
 {
     for (uint32_t i = 0; i < s_saved_n; i++) {

@@ -34,6 +34,10 @@ void settings_set_active(const saved_device_t* dev);
 /* Copy the saved devices into out[0..max). Returns the count. */
 uint32_t settings_get_saved(saved_device_t* out, uint32_t max);
 
+/* True if this address is in the saved list. If pin_out != NULL and found, the
+ * saved PIN is copied there (>= 8 bytes). */
+bool settings_is_saved(const uint8_t addr[6], char* pin_out);
+
 /* Remove a device from the saved list; clears the active device if it matches. */
 void settings_forget(const uint8_t addr[6]);
 
