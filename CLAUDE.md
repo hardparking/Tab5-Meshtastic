@@ -15,7 +15,7 @@ exact Meshtastic GATT contract, and (critically) a table of hardware facts that
 cost real time to learn and must **not be re-derived**. This file only summarizes
 the operational essentials; the PRD is authoritative.
 
-This is a rebuild of `../Tab5-Meshtastic` (v1), which works end-to-end but
+This is a rebuild of `../_archive/Tab5-Meshtastic` (v1), which works end-to-end but
 accreted bugs. v1 is kept as **reference, not a base to fork** — re-implement its
 *guarantees*, not its code (PRD §R5).
 
@@ -33,7 +33,7 @@ re-discover it:
 - **NimBLE as host, controller REMOTE on the C6**: `CONFIG_BT_CONTROLLER_DISABLED=y`,
   `CONFIG_BT_NIMBLE_ENABLED=y`, `CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y`, central +
   observer roles only, security/SM (legacy + SC) enabled. The full block lives in
-  `../Tab5-Meshtastic/sdkconfig.defaults` — copy it; the SDIO pin config comes
+  `../_archive/Tab5-Meshtastic/sdkconfig.defaults` — copy it; the SDIO pin config comes
   from `../M5Tab5-UserDemo/platforms/tab5`.
 
 ```bash

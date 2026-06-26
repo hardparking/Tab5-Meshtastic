@@ -2,7 +2,7 @@
  * Tab5-Meshtastic v2 — display bring-up.
  *
  * Landscape 1280x720 via PPA hardware rotation (LV_DISPLAY_ROTATION_90 +
- * use_ppa). This is the proven path carried forward from ../Tab5-Meshtastic;
+ * use_ppa). This is the proven path carried forward from ../_archive/Tab5-Meshtastic;
  * do NOT switch to runtime LVGL rotation — it corrupts the render (PRD §4).
  */
 

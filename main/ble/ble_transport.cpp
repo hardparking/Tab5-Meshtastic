@@ -1,7 +1,7 @@
 /*
  * Tab5-Meshtastic v2 — BLE transport + sync engine.
  *
- * Re-implements the proven sync/recovery GUARANTEES from ../Tab5-Meshtastic
+ * Re-implements the proven sync/recovery GUARANTEES from ../_archive/Tab5-Meshtastic
  * (not its coupling) against the clean layers:
  *   - poll-driven drain (FromNum notifications never traverse esp-hosted)
  *   - read-timeout recovery: a FromRadio read in flight > 1.5 s is abandoned

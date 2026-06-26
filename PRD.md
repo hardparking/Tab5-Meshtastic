@@ -1,7 +1,7 @@
 # Tab5-Meshtastic v2 — Product Requirements Document
 
 > A Meshtastic BLE client for the M5Stack Tab5 (ESP32-P4 + ESP32-C6). Green-field
-> rebuild. The previous attempt (`../Tab5-Meshtastic`) proved the path works end
+> rebuild. The previous attempt (`../_archive/Tab5-Meshtastic`) proved the path works end
 > to end but accreted bugs across many iterations; this PRD specifies a clean
 > rebuild that treats **stability, clean architecture, and UI responsiveness** as
 > first-class requirements, with the old repo kept only as reference.
@@ -229,7 +229,7 @@ Key rules:
 
 ## 8. UI / UX design language (carried forward)
 
-Reuse the established dark design system (source: `../Tab5-Meshtastic/design/`).
+Reuse the established dark design system (source: `../_archive/Tab5-Meshtastic/design/`).
 1280×720 landscape.
 
 **Palette**
@@ -361,7 +361,7 @@ warm dev boots hid it). Channels, DMs, acks, synced timestamps → v2.
   confirm field/tag compatibility (note from v1: FromRadio variant 9=moduleConfig,
   13=metadata, 17=deviceuiConfig).
 - **R5 — Reusing vs. re-deriving the sync engine.** Green-field per decision, but
-  the v1 `poll_cb`/`try_drain` logic in `../Tab5-Meshtastic/main/main.cpp`
+  the v1 `poll_cb`/`try_drain` logic in `../_archive/Tab5-Meshtastic/main/main.cpp`
   (lines ~142–157, 499–561) is the reference contract for the recovery behavior —
   re-implement its *guarantees*, not necessarily its code.
 
@@ -369,10 +369,10 @@ warm dev boots hid it). Channels, DMs, acks, synced timestamps → v2.
 
 ## 13. Reference material
 
-- `../Tab5-Meshtastic/STATUS.md` — detailed v1 handoff (sync internals appendix).
-- `../Tab5-Meshtastic/README.md` — GATT UUIDs, build/flash, hardware setup.
-- `../Tab5-Meshtastic/design/` — `DESIGN_SPEC.md` + `Tab5_Meshtastic.dc.html` mockup.
-- `../Tab5-Meshtastic/main/{main.cpp,ui.cpp,lcd_tools.cpp}` — working v1 backend,
+- `../_archive/Tab5-Meshtastic/STATUS.md` — detailed v1 handoff (sync internals appendix).
+- `../_archive/Tab5-Meshtastic/README.md` — GATT UUIDs, build/flash, hardware setup.
+- `../_archive/Tab5-Meshtastic/design/` — `DESIGN_SPEC.md` + `Tab5_Meshtastic.dc.html` mockup.
+- `../_archive/Tab5-Meshtastic/main/{main.cpp,ui.cpp,lcd_tools.cpp}` — working v1 backend,
   UI, and proven display init.
 - `../firmware/` — upstream Meshtastic firmware (server-side BLE reference:
   `src/nimble/NimbleBluetooth.cpp`, `src/mesh/PhoneAPI.{h,cpp}`,
