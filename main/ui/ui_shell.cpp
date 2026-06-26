@@ -813,7 +813,10 @@ void do_send(void)
 void ta_event_cb(lv_event_t* e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_FOCUSED) {
+    /* Show the OSK only on a deliberate tap — NOT on every focus. The physical
+     * keyboard focuses the composer programmatically (so its cursor parks here);
+     * gating on CLICKED keeps that from re-summoning the OSK. */
+    if (code == LV_EVENT_CLICKED) {
         lv_keyboard_set_textarea(S.chat_kb, S.chat_input);
         lv_obj_clear_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
     } else if (code == LV_EVENT_DEFOCUSED) {
@@ -877,7 +880,7 @@ lv_obj_t* make_chat_panel(lv_obj_t* parent)
     lv_obj_set_style_text_color(ta, lv_color_hex(C_HI), 0);
     lv_obj_set_style_text_color(ta, lv_color_hex(C_DIM), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_obj_set_style_anim_duration(ta, 0, LV_PART_CURSOR);   /* no blink (FR-4.4) */
-    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_FOCUSED, nullptr);
+    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_DEFOCUSED, nullptr);
     S.chat_input = ta;
 
@@ -1413,6 +1416,9 @@ void ui_kbd_feed(const char* str, unsigned char len, unsigned char modifier)
             update_pin_disp();
         }
     } else if (S.active == 1 && S.chat_input) {         /* chat composer */
+        /* Park the cursor in the composer so hardware typing works without first
+         * tapping it open. add_state (not a click) won't summon the OSK. */
+        lv_obj_add_state(S.chat_input, LV_STATE_FOCUSED);
         if (act == KBD_BACKSPACE) lv_textarea_delete_char(S.chat_input);
         else if (act == KBD_SUBMIT) do_send();
         else if (act == KBD_TEXT) lv_textarea_add_text(S.chat_input, text);
