@@ -1127,17 +1127,24 @@ lv_obj_t* make_radio_panel(lv_obj_t* parent)
     S.v_pin = pv;
     label(pv, "Enter PIN", FONT_ROW, C_HI);
     S.pin_disp = label(pv, "______", FONT_TITLE, C_GREEN);
-    lv_obj_t* pad = box(pv, 304, 248);
-    lv_obj_set_flex_flow(pad, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(pad, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(pad, 4, 0);
     static const char* kDigit[10] = {"0","1","2","3","4","5","6","7","8","9"};
-    const int order[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, -1};
-    for (int k = 0; k < 12; k++) {
-        int v = order[k];
-        if (v == -1) { box(pad, 92, 52); continue; }   /* spacer */
-        const char* lbl = (v == 10) ? LV_SYMBOL_BACKSPACE : kDigit[v];
-        make_btn(pad, lbl, key_cb, (void*)(intptr_t)v, C_SURF, C_HI, 92, 52);
+    /* standard 3-column keypad; bottom row: blank, 0, backspace */
+    const int grid[4][3] = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {-1, 0, 10}};
+    lv_obj_t* pad = box(pv, 300, 244);
+    flex_col(pad);
+    lv_obj_set_flex_align(pad, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(pad, 8, 0);
+    for (int r = 0; r < 4; r++) {
+        lv_obj_t* row = box(pad, 300, 52);
+        flex_row(row);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        for (int c = 0; c < 3; c++) {
+            int v = grid[r][c];
+            if (v == -1) { box(row, 92, 52); continue; }   /* blank cell */
+            const char* lbl = (v == 10) ? LV_SYMBOL_BACKSPACE : kDigit[v];
+            make_btn(row, lbl, key_cb, (void*)(intptr_t)v, C_SURF, C_HI, 92, 52);
+        }
     }
     lv_obj_t* pf = box(pv, 304, 52);
     flex_row(pf);
