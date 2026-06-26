@@ -17,6 +17,13 @@ extern "C" {
  * succeeds. Locks LVGL internally. */
 void ui_start(void);
 
+/* Feed decoded characters from the physical keyboard into the focused input
+ * surface (chat composer or PIN entry, per the active tab). Bytes are raw ASCII:
+ * '\b' = backspace, '\n'/'\r' = submit; printable bytes are inserted. `modifier`
+ * follows the Tab5 keyboard convention (0 = none, 1 = Ctrl, 4 = Alt, 5 = both).
+ * Safe to call from another task — takes the LVGL lock internally. */
+void ui_kbd_feed(const char* str, unsigned char len, unsigned char modifier);
+
 #ifdef __cplusplus
 }
 #endif

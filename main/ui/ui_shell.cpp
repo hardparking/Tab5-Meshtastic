@@ -1348,3 +1348,46 @@ void ui_start(void)
     build_shell();
     lvgl_port_unlock();
 }
+
+/* Physical-keyboard text routing. Called off the keyboard task; we take the
+ * LVGL lock and drive the same paths the touch UI uses (do_send / the PIN
+ * buffer), so input from either source behaves identically. */
+void ui_kbd_feed(const char* str, unsigned char len, unsigned char modifier)
+{
+    if (!str || len == 0) return;
+    /* Ctrl / Alt chords aren't text — ignore them (PIN and chat want plain keys). */
+    if (modifier == 1 || modifier == 4 || modifier == 5) return;
+    if (!lvgl_port_lock(100)) return;   /* drop input rather than block the kbd task */
+
+    const bool pin_active  = (S.active == 2 && S.radio_view == 2);
+    const bool chat_active = (S.active == 1);
+
+    for (unsigned char i = 0; i < len; i++) {
+        const char c = str[i];
+        const bool backspace = (c == '\b' || c == 0x7f);
+        const bool submit    = (c == '\n' || c == '\r');
+
+        if (pin_active) {
+            size_t plen = strlen(S.pin_buf);
+            if (backspace) {
+                if (plen) { S.pin_buf[plen - 1] = 0; update_pin_disp(); }
+            } else if (submit) {
+                if (S.pin_buf[0]) ble_transport_submit_pin((uint32_t)atoi(S.pin_buf));
+            } else if (c >= '0' && c <= '9' && plen < 6) {
+                S.pin_buf[plen] = c;
+                S.pin_buf[plen + 1] = 0;
+                update_pin_disp();
+            }
+        } else if (chat_active && S.chat_input) {
+            if (backspace) {
+                lv_textarea_delete_char(S.chat_input);
+            } else if (submit) {
+                do_send();
+            } else if ((unsigned char)c >= 0x20) {
+                lv_textarea_add_char(S.chat_input, (uint32_t)(unsigned char)c);
+            }
+        }
+    }
+
+    lvgl_port_unlock();
+}

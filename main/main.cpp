@@ -24,6 +24,7 @@
 
 #include "lcd_tools.h"
 #include "ui_shell.h"
+#include "keyboard.h"
 #include "app_state.h"
 #include "settings.h"
 #include "ble_transport.h"
@@ -58,6 +59,10 @@ extern "C" void app_main(void)
     /* Display + LVGL shell first, so chrome is visible while the radio connects. */
     ESP_ERROR_CHECK(app_lcd_lvgl_init(s_board));
     ui_start();
+
+    /* Physical Tab5 keyboard (optional accessory) — feeds the chat composer and
+     * PIN entry. Best-effort: absence is logged, not fatal. */
+    kbd_start();
 
     /* P4<->C6 transport, then the NimBLE host, then our BLE transport. */
     ESP_LOGI(TAG, "esp_hosted_init()");

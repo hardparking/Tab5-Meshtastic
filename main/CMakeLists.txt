@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "board/lcd_tools.cpp"
+        "board/keyboard.cpp"
         "ui/ui_shell.cpp"
         "app/app_state.cpp"
         "app/settings.cpp"
@@ -24,5 +25,6 @@ idf_component_register(
         esp_driver_sdmmc
         esp_timer
         m5_tab5_component
+        m5_tab5_keyboard_component
         meshtastic_protos
 )
