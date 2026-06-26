@@ -92,8 +92,9 @@ struct ShellState {
     lv_obj_t* mgr_status = nullptr;
     lv_obj_t* disco_list = nullptr;
     lv_obj_t* pin_disp   = nullptr;
+    lv_obj_t* pin_dev    = nullptr;   /* name of the device being paired */
     int       radio_view = 0;         /* 0 manager, 1 discovery, 2 pin */
-    uint8_t   pin_addr[6] = {};
+    char      pin_name[32] = {};
     char      pin_buf[8]  = {};
     uint32_t  last_scan_gen = 0xffffffff;
 };
@@ -977,15 +978,16 @@ void disco_row_cb(lv_event_t* e)
 {
     uint32_t i = (uint32_t)(intptr_t)lv_event_get_user_data(e);
     if (i >= g_disco_n) return;
+    snprintf(S.pin_name, sizeof(S.pin_name), "%s", g_disco[i].name);
+    S.pin_buf[0] = 0;
+
     char pin[8];
     if (g_disco[i].saved && settings_is_saved(g_disco[i].addr, pin)) {
-        ble_transport_connect(g_disco[i].addr, (uint32_t)atoi(pin));
-        radio_show(0);
+        ble_transport_connect(g_disco[i].addr, (uint32_t)atoi(pin));  /* known PIN */
     } else {
-        memcpy(S.pin_addr, g_disco[i].addr, 6);
-        S.pin_buf[0] = 0;
-        radio_show(2);
+        ble_transport_connect(g_disco[i].addr, 0);   /* prompt when the radio asks */
     }
+    radio_show(0);   /* the PIN keypad appears via CONN_ENTER_PIN if needed */
 }
 
 void rescan_cb(lv_event_t*) { ble_transport_scan(); rebuild_discovery(); }
@@ -1060,13 +1062,15 @@ void key_cb(lv_event_t* e)
 
 void pin_connect_cb(lv_event_t*)
 {
-    if (S.pin_buf[0]) {
-        ble_transport_connect(S.pin_addr, (uint32_t)atoi(S.pin_buf));
-        radio_show(0);
-    }
+    if (S.pin_buf[0]) ble_transport_submit_pin((uint32_t)atoi(S.pin_buf));
+    /* radio_refresh moves the view off the keypad as the state advances */
 }
 
-void pin_cancel_cb(lv_event_t*) { radio_show(1); }
+void pin_cancel_cb(lv_event_t*)
+{
+    ble_transport_cancel();
+    radio_show(0);
+}
 
 lv_obj_t* make_radio_panel(lv_obj_t* parent)
 {
@@ -1125,7 +1129,8 @@ lv_obj_t* make_radio_panel(lv_obj_t* parent)
     lv_obj_set_style_pad_row(pv, 16, 0);
     lv_obj_add_flag(pv, LV_OBJ_FLAG_HIDDEN);
     S.v_pin = pv;
-    label(pv, "Enter PIN", FONT_ROW, C_HI);
+    S.pin_dev = label(pv, "Enter PIN", FONT_ROW, C_HI);
+    label(pv, "Code shown on your radio (or 123456 if unset)", FONT_META, C_DIM);
     S.pin_disp = label(pv, "______", FONT_TITLE, C_GREEN);
     static const char* kDigit[10] = {"0","1","2","3","4","5","6","7","8","9"};
     /* standard 3-column keypad; bottom row: blank, 0, backspace */
@@ -1159,14 +1164,30 @@ lv_obj_t* make_radio_panel(lv_obj_t* parent)
 
 void radio_refresh(void)
 {
+    app_snapshot_t s;
+    app_state_snapshot(&s);
+
+    /* The radio drives PIN entry: pop the keypad when it asks (CONN_ENTER_PIN),
+     * and leave it once pairing advances. */
+    if (s.state == CONN_ENTER_PIN && S.radio_view != 2) {
+        S.pin_buf[0] = 0;
+        update_pin_disp();
+        if (S.pin_dev) {
+            char t[40];
+            snprintf(t, sizeof(t), "Pair %s", S.pin_name[0] ? S.pin_name : "radio");
+            set_text(S.pin_dev, t);
+        }
+        radio_show(2);
+    } else if (S.radio_view == 2 && s.state != CONN_ENTER_PIN) {
+        radio_show(0);
+    }
+
     /* manager status line */
     if (S.radio_view == 0 && S.mgr_status) {
-        app_snapshot_t s;
-        app_state_snapshot(&s);
         char line[64];
-        if (s.state == CONN_READY)        snprintf(line, sizeof(line), "connected: %s", s.my_long);
+        if (s.state == CONN_READY)          snprintf(line, sizeof(line), "connected: %s", s.my_long);
         else if (s.state == CONN_NO_DEVICE) snprintf(line, sizeof(line), "no device");
-        else                              snprintf(line, sizeof(line), "%s", s.stage);
+        else                                snprintf(line, sizeof(line), "%s", s.stage);
         set_text(S.mgr_status, line);
     }
     /* discovery list refresh as new adverts arrive */

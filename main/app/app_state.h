@@ -28,6 +28,7 @@ typedef enum {
     CONN_NO_DEVICE,     /* nothing saved — onboarding welcome */
     CONN_SCANNING,
     CONN_CONNECTING,
+    CONN_ENTER_PIN,     /* radio requested a passkey — prompt the user */
     CONN_PAIRING,       /* bonding / PIN exchange */
     CONN_SYNCING,       /* draining the config download */
     CONN_READY,

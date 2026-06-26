@@ -96,6 +96,7 @@ static bool     s_enc_done   = false;  /* link encrypted+authenticated        */
 static bool     s_ready      = false;  /* CONFIG COMPLETE this connection      */
 static uint32_t s_my_num     = 0;
 static uint32_t s_wc_id      = 0x2a;   /* incrementing want_config id          */
+static bool     s_pin_failed = false;  /* a prior PIN was rejected → prompt again (persists across reconnect) */
 
 /* diagnostics published to app_state */
 static diag_t   s_d;
@@ -561,11 +562,19 @@ static int gap_event(struct ble_gap_event* event, void* arg)
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
-            struct ble_sm_io io = {};
-            io.action  = BLE_SM_IOACT_INPUT;
-            io.passkey = s_target.pin;
-            int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
-            ESP_LOGI(TAG, "injected PIN rc=%d", rc);
+            /* If we already know a PIN (saved/fixed) and it hasn't been rejected,
+             * inject it. Otherwise the radio is showing a code (random PIN, or our
+             * saved one was wrong) — prompt the user. */
+            if (s_target.pin != 0 && !s_pin_failed) {
+                struct ble_sm_io io = {};
+                io.action  = BLE_SM_IOACT_INPUT;
+                io.passkey = s_target.pin;
+                int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
+                ESP_LOGI(TAG, "injected known PIN rc=%d", rc);
+            } else {
+                ESP_LOGI(TAG, "radio requests passkey — prompting user");
+                set_stage(CONN_ENTER_PIN, "ENTER PIN");
+            }
         }
         return 0;
 
@@ -585,9 +594,11 @@ static int gap_event(struct ble_gap_event* event, void* arg)
             memset(&s_conn.svc_start, 0, sizeof(s_conn) - sizeof(s_conn.conn_handle));
             ble_gattc_disc_svc_by_uuid(s_conn.conn_handle, &kSvcUuid.u, svc_cb, NULL);
         } else {
-            /* Failed encryption is the stale/mismatched-bond signature; drop the
-             * bond now so the next attempt pairs fresh. */
-            ESP_LOGW(TAG, "encryption FAILED — dropping stale bond + reconnecting");
+            /* Failed encryption is the stale/mismatched-bond (or wrong-PIN)
+             * signature; drop the bond and re-pair, and prompt for the PIN next
+             * time in case the saved one was wrong (e.g. a random-PIN radio). */
+            ESP_LOGW(TAG, "encryption FAILED — dropping bond + reconnecting (will prompt for PIN)");
+            s_pin_failed = true;
             if (s_have_peer) ble_gap_unpair(&s_peer_addr);
             ble_gap_terminate(s_conn.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
@@ -686,6 +697,7 @@ void ble_transport_connect(const uint8_t addr[6], uint32_t pin)
     s_target.name[0] = 0;        /* captured from the advert on match */
     s_target.have    = true;
     s_target.saved   = false;    /* (re)persist on a clean sync       */
+    s_pin_failed     = false;    /* fresh user-initiated attempt      */
     s_mode = MODE_CONNECT;
     app_state_clear_scan();
     ble_gap_disc_cancel();
@@ -698,6 +710,29 @@ void ble_transport_connect(const uint8_t addr[6], uint32_t pin)
     } else {
         start_scan();
     }
+}
+
+void ble_transport_submit_pin(uint32_t pin)
+{
+    s_target.pin = pin;
+    s_pin_failed = false;
+    struct ble_sm_io io = {};
+    io.action  = BLE_SM_IOACT_INPUT;
+    io.passkey = pin;
+    int rc = ble_sm_inject_io(s_conn.conn_handle, &io);
+    ESP_LOGI(TAG, "submitted user PIN rc=%d", rc);
+    set_stage(CONN_PAIRING, "PAIRING");
+}
+
+void ble_transport_cancel(void)
+{
+    /* Abort: stop auto-reconnect and drop the link. */
+    s_mode        = MODE_IDLE;
+    s_target.have = false;
+    if (s_conn.conn_handle)
+        ble_gap_terminate(s_conn.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    else
+        set_stage(CONN_NO_DEVICE, "NO DEVICE");
 }
 
 void ble_transport_forget(const uint8_t addr[6])

@@ -35,10 +35,17 @@ void ble_transport_send_text(const char* text);
  * (does not connect). */
 void ble_transport_scan(void);
 
-/* Connect to a specific device with the given numeric PIN, bond, and (on a
- * clean sync) persist it as the active device. Switches away from any current
- * connection. */
+/* Connect to a specific device and bond. Pass pin = 0 to be prompted for the
+ * passkey when the radio requests it (works for both fixed and random PIN); pass
+ * a known PIN to inject it automatically. On a clean sync the device is
+ * persisted as active. Switches away from any current connection. */
 void ble_transport_connect(const uint8_t addr[6], uint32_t pin);
+
+/* Supply the passkey the radio is displaying (in response to CONN_ENTER_PIN). */
+void ble_transport_submit_pin(uint32_t pin);
+
+/* Abort an in-progress pairing/connection (e.g. PIN entry cancelled). */
+void ble_transport_cancel(void);
 
 /* Forget a saved device: drop its bond and remove it from settings. If it is
  * the active device, disconnect. */
