@@ -62,6 +62,7 @@ struct ShellState {
     NodeSort  sort           = SORT_HEARD;
     uint32_t  last_gen       = 0xffffffff;
     NodeSort  last_sort      = SORT_HEARD;
+    int64_t   last_rebuild_us = 0;      /* throttles full rebuilds during the sync flood */
 
     /* node detail view (overlays the content area) */
     lv_obj_t* detail      = nullptr;
@@ -466,16 +467,29 @@ void refresh_cb(lv_timer_t*)
 #endif
 
     /* Full rebuild (clean + recreate rows) only on add/remove/sort — never on
-     * SNR jitter (FR-3.2) or a timer. Otherwise, while the tab is visible,
-     * refresh ages + SNR in place on the existing rows (cheap, no churn). */
+     * SNR jitter (FR-3.2) or a timer — and only while the Nodes tab is actually
+     * the visible view. A hidden list never needs repainting, and rebuilding it
+     * off-tab just burns the LVGL task.
+     *
+     * During CONN_SYNCING the radio streams NodeInfo faster than a human can
+     * read, so nodes_gen changes on essentially every tick. A full clean +
+     * recreate (~13 LVGL objects/row) each tick monopolizes the single LVGL
+     * task and starves touch — the UI feels frozen. Rate-limit rebuilds while
+     * syncing; the list still catches up each window, and the cheap in-place
+     * age/SNR refresh keeps the already-shown rows live in between. */
     uint32_t gen = app_state_nodes_gen();
     int64_t  now = esp_timer_get_time();
-    if (gen != S.last_gen || S.sort != S.last_sort) {
-        rebuild_nodes(now);
-        S.last_gen  = gen;
-        S.last_sort = S.sort;
-    } else if (S.active == 0 && !S.detail_open) {
-        refresh_node_rows(now);
+    if (S.active == 0 && !S.detail_open) {
+        bool    dirty   = (gen != S.last_gen || S.sort != S.last_sort);
+        int64_t min_gap = (s.state == CONN_SYNCING) ? 2000000 : 0;   /* 2 s during the flood */
+        if (dirty && now - S.last_rebuild_us >= min_gap) {
+            rebuild_nodes(now);
+            S.last_gen        = gen;
+            S.last_sort       = S.sort;
+            S.last_rebuild_us = now;
+        } else {
+            refresh_node_rows(now);
+        }
     }
 
     /* keep the open detail view live (SNR / last-heard / telemetry) */
