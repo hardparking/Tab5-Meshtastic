@@ -115,7 +115,7 @@ dependencies:
   m5_tab5_component:
     dependencies: []
     source:
-      path: /home/adam/code/tab5/Tab5-Meshtastic-v2/components/m5_tab5_component
+      path: /home/adam/code/tab5/Tab5-Meshtastic/components/m5_tab5_component
       type: local
     version: 0.1.0
 direct_dependencies:
