@@ -10,6 +10,11 @@ comes from the onboard **ESP32-C6**, reached over **esp-hosted** (SDIO): NimBLE
 runs on the P4 as the host, with the controller on the C6 and HCI tunnelled over
 the hosted link.
 
+![Nodes view](docs/nodes-view.png)
+
+> The **Nodes** view — live mesh with signal, hops, and last-heard. (Design
+> reference; the on-device render tracks it closely, if not pixel-for-pixel.)
+
 ## Features
 
 - **Onboarding / device picker** — scan, pick a radio, enter its PIN, and it's
