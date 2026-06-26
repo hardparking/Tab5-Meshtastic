@@ -500,7 +500,7 @@ lv_obj_t* make_card(lv_obj_t* parent, const char* title)
     lv_obj_set_style_pad_all(card, 12, 0);
     lv_obj_set_style_pad_row(card, 6, 0);
     label(card, title, FONT_META, C_DIM);
-    return label(card, "—", FONT_TITLE, C_HI);
+    return label(card, "--", FONT_TITLE, C_HI);
 }
 
 /* A "label: value" metrics line. Returns the value label. */
@@ -511,7 +511,7 @@ lv_obj_t* make_metric(lv_obj_t* parent, const char* title)
     lv_obj_set_style_pad_column(row, 10, 0);
     lv_obj_t* t = label(row, title, FONT_BODY, C_MID);
     lv_obj_set_width(t, 180);
-    return label(row, "—", FONT_BODY, C_HI);
+    return label(row, "--", FONT_BODY, C_HI);
 }
 
 void back_cb(lv_event_t*) { close_detail(); }
@@ -547,8 +547,8 @@ lv_obj_t* make_detail_panel(lv_obj_t* parent)
     lv_obj_set_flex_grow(idcol, 1);
     flex_col(idcol);
     lv_obj_set_flex_align(idcol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    S.d_name = label(idcol, "—", FONT_TITLE, C_HI);
-    S.d_id   = label(idcol, "—", FONT_META, C_DIM);
+    S.d_name = label(idcol, "--", FONT_TITLE, C_HI);
+    S.d_id   = label(idcol, "--", FONT_META, C_DIM);
 
     /* body (scrollable in case of overflow) */
     lv_obj_t* body = box(panel, lv_pct(100), 0);
@@ -577,7 +577,7 @@ lv_obj_t* make_detail_panel(lv_obj_t* parent)
     lv_obj_set_style_pad_all(pos, 14, 0);
     lv_obj_set_style_pad_row(pos, 6, 0);
     label(pos, "POSITION", FONT_META, C_DIM);
-    S.d_pos = label(pos, "—", FONT_ROW, C_HI);
+    S.d_pos = label(pos, "--", FONT_ROW, C_HI);
 
     /* device metrics */
     lv_obj_t* met = box(body, lv_pct(100), 0);
@@ -626,7 +626,7 @@ void populate_detail(void)
     if (n.has_metrics && n.metrics.has_batt) {
         if (n.metrics.batt > 100) set_text(S.d_batt, "PWR");
         else { snprintf(buf, sizeof(buf), "%lu%%", (unsigned long)n.metrics.batt); set_text(S.d_batt, buf); }
-    } else set_text(S.d_batt, "—");
+    } else set_text(S.d_batt, "--");
 
     /* position */
     if (n.has_position && n.position.has_loc) {
@@ -645,13 +645,13 @@ void populate_detail(void)
     /* metrics */
     const mesh_metrics_t* m = &n.metrics;
     if (n.has_metrics && m->has_volt)     { snprintf(buf, sizeof(buf), "%.2f V", (double)m->volt); set_text(S.d_volt, buf); }
-    else set_text(S.d_volt, "—");
+    else set_text(S.d_volt, "--");
     if (n.has_metrics && m->has_chanutil) { snprintf(buf, sizeof(buf), "%.1f %%", (double)m->chan_util); set_text(S.d_chan, buf); }
-    else set_text(S.d_chan, "—");
+    else set_text(S.d_chan, "--");
     if (n.has_metrics && m->has_airtx)    { snprintf(buf, sizeof(buf), "%.1f %%", (double)m->air_tx); set_text(S.d_air, buf); }
-    else set_text(S.d_air, "—");
+    else set_text(S.d_air, "--");
     if (n.has_metrics && m->has_uptime)   { fmt_uptime(m->uptime, buf, sizeof(buf)); set_text(S.d_uptime, buf); }
-    else set_text(S.d_uptime, "—");
+    else set_text(S.d_uptime, "--");
 }
 
 void open_detail(uint32_t num)
