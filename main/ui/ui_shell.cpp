@@ -64,6 +64,19 @@ ShellState S;
 /* scratch copy for rebuilds — file static so it never lands on a task stack */
 node_rec_t g_nodes[APP_MAX_NODES];
 
+/* Stable per-row widget handles so last-heard ages and SNR can be refreshed in
+ * place every tick without rebuilding the row (rebuild only on add/remove/sort).
+ * Parallel to the rows currently in nodes_list, in display order. */
+struct NodeRow {
+    uint32_t  num;
+    lv_obj_t* snr_lbl;
+    lv_obj_t* bars[4];
+    lv_obj_t* age_lbl;
+    int       bucket;   /* last-rendered signal bucket (to gate bar restyle) */
+};
+NodeRow  g_rows[APP_MAX_NODES];
+uint32_t g_row_n = 0;
+
 /* ---- small style helpers ---- */
 
 lv_obj_t* box(lv_obj_t* parent, int w, int h)
@@ -195,7 +208,12 @@ int cmp_nodes(const void* a, const void* b)
     return 0;
 }
 
-void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us)
+void style_bars(lv_obj_t* const bars[4], int lit, uint32_t color)
+{
+    for (int b = 0; b < 4; b++) bg(bars[b], b < lit ? color : C_HAIRLINE);
+}
+
+void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us, NodeRow* out)
 {
     lv_obj_t* row = box(parent, lv_pct(100), M_ROW_H);
     flex_row(row);
@@ -232,6 +250,7 @@ void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us)
         lv_obj_t* bar = box(sig, 4, hgt[b]);
         bg(bar, b < bars ? scol : C_HAIRLINE);
         radius(bar, 1);
+        out->bars[b] = bar;
     }
 
     /* numeric dB */
@@ -258,6 +277,41 @@ void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us)
     lv_obj_t* al = label(row, age, FONT_META, C_DIM);
     lv_obj_set_width(al, 48);
     lv_obj_set_style_text_align(al, LV_TEXT_ALIGN_RIGHT, 0);
+
+    out->num     = n->num;
+    out->snr_lbl = sl;
+    out->age_lbl = al;
+    out->bucket  = bars;
+}
+
+/* Refresh last-heard ages + SNR on the existing rows without rebuilding them
+ * (FR-3.2: no full repaint on SNR jitter). Matches rows to the live DB by num;
+ * restyles the bars only when the signal bucket actually crosses a threshold. */
+void refresh_node_rows(int64_t now_us)
+{
+    uint32_t n = app_state_copy_nodes(g_nodes, APP_MAX_NODES);
+    for (uint32_t i = 0; i < g_row_n; i++) {
+        NodeRow* r = &g_rows[i];
+        const node_rec_t* nd = nullptr;
+        for (uint32_t j = 0; j < n; j++)
+            if (g_nodes[j].num == r->num) { nd = &g_nodes[j]; break; }
+        if (!nd) continue;
+
+        char age[12];
+        fmt_age(now_us - nd->last_heard_us, age, sizeof(age));
+        set_text(r->age_lbl, age);
+
+        int bars; uint32_t scol;
+        signal_bucket(nd->snr, &bars, &scol);
+        char snr[12];
+        snprintf(snr, sizeof(snr), "%.0f", (double)nd->snr);
+        set_text(r->snr_lbl, snr);
+        if (bars != r->bucket) {            /* bucket crossed — restyle bars + dB color */
+            style_bars(r->bars, bars, scol);
+            set_color(r->snr_lbl, scol);
+            r->bucket = bars;
+        }
+    }
 }
 
 void rebuild_nodes(int64_t now_us)
@@ -266,8 +320,12 @@ void rebuild_nodes(int64_t now_us)
     uint32_t n = app_state_copy_nodes(g_nodes, APP_MAX_NODES);
     qsort(g_nodes, n, sizeof(node_rec_t), cmp_nodes);
 
+    int32_t scroll_y = lv_obj_get_scroll_y(S.nodes_list);   /* preserve view */
     lv_obj_clean(S.nodes_list);
-    for (uint32_t i = 0; i < n; i++) add_node_row(S.nodes_list, &g_nodes[i], now_us);
+    g_row_n = 0;
+    for (uint32_t i = 0; i < n && i < APP_MAX_NODES; i++)
+        add_node_row(S.nodes_list, &g_nodes[i], now_us, &g_rows[g_row_n++]);
+    lv_obj_scroll_to_y(S.nodes_list, scroll_y, LV_ANIM_OFF);
 
     if (S.nodes_count) {
         char c[24];
@@ -329,15 +387,17 @@ void refresh_cb(lv_timer_t*)
     }
 #endif
 
-    /* Rebuild the node list only on a meaningful change or a sort change — never
-     * on SNR jitter (FR-3.2) and never on a timer (rebuilding the whole list
-     * churns hundreds of LVGL objects). Relative last-heard ages refresh on the
-     * next meaningful change, which a live mesh produces continually. */
+    /* Full rebuild (clean + recreate rows) only on add/remove/sort — never on
+     * SNR jitter (FR-3.2) or a timer. Otherwise, while the tab is visible,
+     * refresh ages + SNR in place on the existing rows (cheap, no churn). */
     uint32_t gen = app_state_nodes_gen();
+    int64_t  now = esp_timer_get_time();
     if (gen != S.last_gen || S.sort != S.last_sort) {
-        rebuild_nodes(esp_timer_get_time());
+        rebuild_nodes(now);
         S.last_gen  = gen;
         S.last_sort = S.sort;
+    } else if (S.active == 0) {
+        refresh_node_rows(now);
     }
 }
 
