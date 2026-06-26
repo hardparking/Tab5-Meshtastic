@@ -22,6 +22,11 @@ extern "C" {
  * and begin scanning on sync. Call once from app_main after nimble_port_init(). */
 void ble_transport_start(void);
 
+/* Narrow UI→BLE command: send a broadcast text message on the primary channel.
+ * Safe to call from the LVGL task (NimBLE GATT writes are thread-safe). No-op if
+ * not connected. */
+void ble_transport_send_text(const char* text);
+
 #ifdef __cplusplus
 }
 #endif

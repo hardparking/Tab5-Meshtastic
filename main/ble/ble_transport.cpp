@@ -167,6 +167,25 @@ static void send_want_config(void)
     publish_diag();
 }
 
+/* Send a broadcast text message and locally echo it (the radio doesn't loop our
+ * own broadcast back). Called from the LVGL task; NimBLE GATT writes are
+ * thread-safe. */
+void ble_transport_send_text(const char* text)
+{
+    if (!text || !text[0]) return;
+    if (s_conn.toradio_handle == 0) {
+        ESP_LOGW(TAG, "send_text ignored — not connected");
+        return;
+    }
+    app_state_add_message(s_my_num, text, true, esp_timer_get_time());   /* local echo */
+
+    uint8_t buf[256];
+    size_t n = mesh_encode_text(text, buf, sizeof(buf));
+    if (n == 0) { ESP_LOGE(TAG, "text encode failed"); return; }
+    int rc = ble_gattc_write_flat(s_conn.conn_handle, s_conn.toradio_handle, buf, n, NULL, NULL);
+    ESP_LOGI(TAG, "sent text (%u bytes) rc=%d", (unsigned)n, rc);
+}
+
 /* ====================== FromNum subscribe ===================== */
 
 static int subscribe_cb(uint16_t, const struct ble_gatt_error* error,
@@ -305,7 +324,8 @@ static void handle_event(const mesh_event_t* ev, uint16_t len)
     case MESH_EV_TEXT:
         ESP_LOGW(TAG, "TEXT from 0x%08lx: \"%s\"",
                  (unsigned long)ev->u.text.from, ev->u.text.text);
-        /* M4 routes this into the chat message log. */
+        app_state_add_message(ev->u.text.from, ev->u.text.text,
+                              ev->u.text.from == s_my_num, esp_timer_get_time());
         break;
     case MESH_EV_POSITION:
         app_state_set_node_position(ev->u.position.from, &ev->u.position.pos,

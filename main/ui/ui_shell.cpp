@@ -10,6 +10,7 @@
 #include "ui_shell.h"
 #include "theme.h"
 #include "app_state.h"
+#include "ble_transport.h"
 
 #include "lvgl.h"
 #include "lvgl_port.h"
@@ -75,6 +76,12 @@ struct ShellState {
     lv_obj_t* d_chan  = nullptr;
     lv_obj_t* d_air   = nullptr;
     lv_obj_t* d_uptime = nullptr;
+
+    /* chat tab */
+    lv_obj_t* chat_list  = nullptr;   /* scrolling bubble area   */
+    lv_obj_t* chat_input = nullptr;   /* composer textarea       */
+    lv_obj_t* chat_kb    = nullptr;   /* on-screen keyboard      */
+    uint32_t  msg_seen   = 0;         /* bubbles already rendered */
 };
 ShellState S;
 
@@ -127,10 +134,11 @@ lv_obj_t* label(lv_obj_t* parent, const char* t, const lv_font_t* f, uint32_t c)
     return l;
 }
 
-/* forward decls: node detail view (defined after the nodes panel) */
+/* forward decls: detail view + chat (defined after the nodes panel) */
 void open_detail(uint32_t num);
 void close_detail(void);
 void populate_detail(void);
+void append_messages(void);
 
 void flex_row(lv_obj_t* o)
 {
@@ -172,6 +180,7 @@ void set_tab(int i)
 {
     if (i < 0 || i >= NUM_TABS) return;
     close_detail();   /* leaving to another tab dismisses the node detail */
+    if (S.chat_kb) lv_obj_add_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);   /* hide OSK */
     S.active = i;
     for (int t = 0; t < NUM_TABS; t++) {
         bool on = (t == i);
@@ -434,6 +443,9 @@ void refresh_cb(lv_timer_t*)
 
     /* keep the open detail view live (SNR / last-heard / telemetry) */
     if (S.detail_open) populate_detail();
+
+    /* chat: append any newly-arrived messages (snappy path, FR-4.3) */
+    append_messages();
 }
 
 /* The live Nodes tab: header (title + count + sort chips) over a scrolling list. */
@@ -668,6 +680,171 @@ void close_detail(void)
     if (S.detail) lv_obj_add_flag(S.detail, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* ---- chat tab (PRD §6.4) ---- */
+
+/* Resolve a sender's short display name from the node DB; hex fallback. */
+void sender_name(uint32_t num, char* out, size_t cap)
+{
+    node_rec_t n;
+    if (app_state_get_node(num, &n) && n.has_user && n.short_name[0])
+        snprintf(out, cap, "%s", n.short_name);
+    else
+        snprintf(out, cap, "!%04lx", (unsigned long)(num & 0xffff));
+}
+
+void add_bubble(lv_obj_t* parent, const msg_rec_t* m)
+{
+    lv_obj_t* row = box(parent, lv_pct(100), LV_SIZE_CONTENT);
+    flex_row(row);
+    /* self → right, received → left */
+    lv_obj_set_flex_align(row, m->is_self ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t* col = box(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    flex_col(col);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START,
+                          m->is_self ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+                          m->is_self ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(col, 2, 0);
+
+    if (!m->is_self) {
+        char who[16];
+        sender_name(m->from, who, sizeof(who));
+        label(col, who, FONT_META, C_MID);
+    }
+
+    lv_obj_t* bub = box(col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    bg(bub, m->is_self ? C_GREEN : C_SURF);
+    radius(bub, M_RAD_M);
+    lv_obj_set_style_pad_hor(bub, 12, 0);
+    lv_obj_set_style_pad_ver(bub, 8, 0);
+    lv_obj_t* txt = label(bub, m->text, FONT_BODY, m->is_self ? C_INK : C_HI);
+    if (strlen(m->text) > 28) {                  /* wrap long messages */
+        lv_obj_set_width(txt, 680);
+        lv_label_set_long_mode(txt, LV_LABEL_LONG_MODE_WRAP);
+    }
+}
+
+/* Append only newly-arrived messages (FR-4.3: no whole-list rebuild on the
+ * steady-state path) and scroll to the newest. */
+void append_messages(void)
+{
+    uint32_t total = app_state_msg_total();
+    if (total == S.msg_seen || !S.chat_list) return;
+
+    static msg_rec_t buf[APP_MAX_MSGS];
+    uint32_t n         = app_state_copy_messages(buf, APP_MAX_MSGS);
+    uint32_t new_count = total - S.msg_seen;
+    if (new_count > n) {                          /* first load or dropped gap */
+        lv_obj_clean(S.chat_list);
+        for (uint32_t i = 0; i < n; i++) add_bubble(S.chat_list, &buf[i]);
+    } else {
+        for (uint32_t i = n - new_count; i < n; i++) add_bubble(S.chat_list, &buf[i]);
+    }
+    S.msg_seen = total;
+
+    uint32_t cnt = lv_obj_get_child_count(S.chat_list);
+    if (cnt) lv_obj_scroll_to_view(lv_obj_get_child(S.chat_list, cnt - 1), LV_ANIM_OFF);
+}
+
+void do_send(void)
+{
+    const char* t = lv_textarea_get_text(S.chat_input);
+    if (!t || !t[0]) return;
+    ble_transport_send_text(t);          /* transmits + local-echoes into the log */
+    lv_textarea_set_text(S.chat_input, "");
+}
+
+void ta_event_cb(lv_event_t* e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_FOCUSED) {
+        lv_keyboard_set_textarea(S.chat_kb, S.chat_input);
+        lv_obj_clear_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
+    } else if (code == LV_EVENT_DEFOCUSED) {
+        lv_obj_add_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void kb_event_cb(lv_event_t* e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {                 /* checkmark = send */
+        do_send();
+    } else if (code == LV_EVENT_CANCEL) {
+        lv_obj_add_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void send_btn_cb(lv_event_t*) { do_send(); }
+
+lv_obj_t* make_chat_panel(lv_obj_t* parent)
+{
+    lv_obj_t* panel = box(parent, lv_pct(100), lv_pct(100));
+    flex_col(panel);
+
+    lv_obj_t* hdr = box(panel, lv_pct(100), 44);
+    flex_row(hdr);
+    lv_obj_set_style_pad_hor(hdr, 20, 0);
+    lv_obj_set_style_pad_column(hdr, 10, 0);
+    hairline_side(hdr, LV_BORDER_SIDE_BOTTOM);
+    label(hdr, "Primary", FONT_ROW, C_HI);
+    label(hdr, "broadcast", FONT_META, C_DIM);
+
+    lv_obj_t* list = box(panel, lv_pct(100), 0);
+    lv_obj_set_flex_grow(list, 1);
+    flex_col(list);
+    lv_obj_set_style_pad_hor(list, 16, 0);
+    lv_obj_set_style_pad_ver(list, 12, 0);
+    lv_obj_set_style_pad_row(list, 10, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    S.chat_list = list;
+
+    /* composer */
+    lv_obj_t* comp = box(panel, lv_pct(100), 60);
+    bg(comp, C_CHROME);
+    flex_row(comp);
+    lv_obj_set_style_pad_hor(comp, 12, 0);
+    lv_obj_set_style_pad_column(comp, 10, 0);
+    hairline_side(comp, LV_BORDER_SIDE_TOP);
+
+    lv_obj_t* ta = lv_textarea_create(comp);
+    lv_obj_set_flex_grow(ta, 1);
+    lv_obj_set_height(ta, 44);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_placeholder_text(ta, "Message the mesh...");
+    lv_textarea_set_max_length(ta, 200);
+    bg(ta, C_SURF2);
+    radius(ta, M_RAD_M);
+    lv_obj_set_style_border_width(ta, 0, 0);
+    lv_obj_set_style_text_font(ta, FONT_BODY, 0);
+    lv_obj_set_style_text_color(ta, lv_color_hex(C_HI), 0);
+    lv_obj_set_style_text_color(ta, lv_color_hex(C_DIM), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_style_anim_duration(ta, 0, LV_PART_CURSOR);   /* no blink (FR-4.4) */
+    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_FOCUSED, nullptr);
+    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_DEFOCUSED, nullptr);
+    S.chat_input = ta;
+
+    lv_obj_t* send = box(comp, 64, 44);
+    bg(send, C_GREEN);
+    radius(send, M_RAD_M);
+    lv_obj_add_flag(send, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(send, send_btn_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_center(label(send, LV_SYMBOL_OK, FONT_ROW, C_INK));
+
+    /* on-screen keyboard — overlays from the bottom; shown only on focus */
+    lv_obj_t* kb = lv_keyboard_create(lv_screen_active());
+    lv_obj_set_size(kb, lv_pct(100), 320);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_CANCEL, nullptr);
+    S.chat_kb = kb;
+
+    return panel;
+}
+
 /* A content panel: header title + centered milestone placeholder. */
 lv_obj_t* make_panel(lv_obj_t* parent, const char* title, const char* hint)
 {
@@ -776,7 +953,7 @@ void build_shell(void)
     bg(content, C_BG);
 
     S.panel[0] = make_nodes_panel(content);
-    S.panel[1] = make_panel(content, "Primary  -  broadcast", "Chat lands in M4");
+    S.panel[1] = make_chat_panel(content);
     S.panel[2] = make_panel(content, "Radio", "Onboarding / device picker lands in M5");
     S.detail   = make_detail_panel(content);   /* overlays the content area */
 

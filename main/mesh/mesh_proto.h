@@ -90,6 +90,10 @@ typedef struct {
  * byte-identical consecutive ToRadio writes (PRD §4). */
 size_t mesh_encode_want_config(uint32_t id, uint8_t* buf, size_t cap);
 
+/* Encode ToRadio{ broadcast TEXT_MESSAGE_APP = text } into buf. Returns bytes
+ * written, 0 on failure. */
+size_t mesh_encode_text(const char* text, uint8_t* buf, size_t cap);
+
 /* Decode one FromRadio protobuf. Always fills *ev (kind == MESH_EV_DECODE_FAIL
  * on failure). Returns true if decoding succeeded. */
 bool mesh_decode_fromradio(const uint8_t* data, uint16_t len, mesh_event_t* ev);

@@ -21,6 +21,8 @@ struct AppState {
     node_rec_t        nodes[APP_MAX_NODES];
     uint32_t          node_n;
     uint32_t          nodes_gen;
+    msg_rec_t         msgs[APP_MAX_MSGS];   /* ring buffer */
+    uint32_t          msg_total;            /* monotonic count ever appended */
 };
 
 AppState g;
@@ -153,6 +155,39 @@ bool app_state_get_node(uint32_t num, node_rec_t* out)
     }
     unlock();
     return found;
+}
+
+void app_state_add_message(uint32_t from, const char* text, bool is_self, int64_t now_us)
+{
+    lock();
+    msg_rec_t* m = &g.msgs[g.msg_total % APP_MAX_MSGS];
+    m->from    = from;
+    m->is_self = is_self;
+    m->recv_us = now_us;
+    copy_str(m->text, sizeof(m->text), text);
+    g.msg_total++;
+    unlock();
+}
+
+uint32_t app_state_msg_total(void)
+{
+    lock();
+    uint32_t t = g.msg_total;
+    unlock();
+    return t;
+}
+
+uint32_t app_state_copy_messages(msg_rec_t* out, uint32_t max)
+{
+    lock();
+    uint32_t have = g.msg_total < APP_MAX_MSGS ? g.msg_total : APP_MAX_MSGS;
+    uint32_t n    = have < max ? have : max;
+    /* copy the n most recent, oldest first */
+    uint32_t first = g.msg_total - n;   /* monotonic index of first to copy */
+    for (uint32_t i = 0; i < n; i++)
+        out[i] = g.msgs[(first + i) % APP_MAX_MSGS];
+    unlock();
+    return n;
 }
 
 void app_state_clear_nodes(void)

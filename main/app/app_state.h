@@ -107,6 +107,27 @@ void app_state_set_node_metrics(uint32_t num, const mesh_metrics_t* metrics, int
 /* Fetch one node by num for the detail view. Returns false if not present. */
 bool app_state_get_node(uint32_t num, node_rec_t* out);
 
+/* ---- message log (PRD §6.4 / §10) ---- */
+#define APP_MAX_MSGS 64
+
+typedef struct {
+    uint32_t from;        /* sender node num (0 / self for local echo) */
+    char     text[233];
+    bool     is_self;     /* we sent it (right-aligned, green)         */
+    int64_t  recv_us;     /* esp_timer time appended                   */
+} msg_rec_t;
+
+/* Append one message to the bounded ring (oldest dropped past APP_MAX_MSGS). */
+void app_state_add_message(uint32_t from, const char* text, bool is_self, int64_t now_us);
+
+/* Total messages ever appended (monotonic). The UI compares it to what it has
+ * already rendered so it can append only the new ones (FR-4.3, no full rebuild). */
+uint32_t app_state_msg_total(void);
+
+/* Copy up to `max` of the most recent messages into out[] (oldest first).
+ * Returns the count copied. */
+uint32_t app_state_copy_messages(msg_rec_t* out, uint32_t max);
+
 /* ---- readers (called from the UI/LVGL task) ---- */
 void app_state_snapshot(app_snapshot_t* out);
 

@@ -56,6 +56,24 @@ size_t mesh_encode_want_config(uint32_t id, uint8_t* buf, size_t cap)
     return os.bytes_written;
 }
 
+size_t mesh_encode_text(const char* text, uint8_t* buf, size_t cap)
+{
+    meshtastic_ToRadio t    = meshtastic_ToRadio_init_zero;
+    t.which_payload_variant = meshtastic_ToRadio_packet_tag;
+    meshtastic_MeshPacket* p = &t.packet;
+    p->to                     = 0xffffffff;   /* broadcast */
+    p->which_payload_variant  = meshtastic_MeshPacket_decoded_tag;
+    p->decoded.portnum        = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    size_t n = strlen(text);
+    if (n > sizeof(p->decoded.payload.bytes)) n = sizeof(p->decoded.payload.bytes);
+    memcpy(p->decoded.payload.bytes, text, n);
+    p->decoded.payload.size = n;
+
+    pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+    if (!pb_encode(&os, meshtastic_ToRadio_fields, &t)) return 0;
+    return os.bytes_written;
+}
+
 bool mesh_decode_fromradio(const uint8_t* data, uint16_t len, mesh_event_t* ev)
 {
     memset(ev, 0, sizeof(*ev));
