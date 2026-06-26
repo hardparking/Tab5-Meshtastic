@@ -58,6 +58,23 @@ struct ShellState {
     NodeSort  sort           = SORT_HEARD;
     uint32_t  last_gen       = 0xffffffff;
     NodeSort  last_sort      = SORT_HEARD;
+
+    /* node detail view (overlays the content area) */
+    lv_obj_t* detail      = nullptr;
+    bool      detail_open = false;
+    uint32_t  detail_num  = 0;
+    lv_obj_t* d_badge = nullptr;
+    lv_obj_t* d_name  = nullptr;
+    lv_obj_t* d_id    = nullptr;
+    lv_obj_t* d_snr   = nullptr;
+    lv_obj_t* d_hops  = nullptr;
+    lv_obj_t* d_heard = nullptr;
+    lv_obj_t* d_batt  = nullptr;
+    lv_obj_t* d_pos   = nullptr;
+    lv_obj_t* d_volt  = nullptr;
+    lv_obj_t* d_chan  = nullptr;
+    lv_obj_t* d_air   = nullptr;
+    lv_obj_t* d_uptime = nullptr;
 };
 ShellState S;
 
@@ -88,6 +105,7 @@ lv_obj_t* box(lv_obj_t* parent, int w, int h)
     lv_obj_set_style_radius(o, 0, 0);
     lv_obj_set_style_pad_all(o, 0, 0);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);   /* interactive elements opt in */
     return o;
 }
 
@@ -105,8 +123,14 @@ lv_obj_t* label(lv_obj_t* parent, const char* t, const lv_font_t* f, uint32_t c)
     lv_label_set_text(l, t);
     lv_obj_set_style_text_font(l, f, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
     return l;
 }
+
+/* forward decls: node detail view (defined after the nodes panel) */
+void open_detail(uint32_t num);
+void close_detail(void);
+void populate_detail(void);
 
 void flex_row(lv_obj_t* o)
 {
@@ -147,6 +171,7 @@ void set_color(lv_obj_t* l, uint32_t c)
 void set_tab(int i)
 {
     if (i < 0 || i >= NUM_TABS) return;
+    close_detail();   /* leaving to another tab dismisses the node detail */
     S.active = i;
     for (int t = 0; t < NUM_TABS; t++) {
         bool on = (t == i);
@@ -213,6 +238,11 @@ void style_bars(lv_obj_t* const bars[4], int lit, uint32_t color)
     for (int b = 0; b < 4; b++) bg(bars[b], b < lit ? color : C_HAIRLINE);
 }
 
+void row_click_cb(lv_event_t* e)
+{
+    open_detail((uint32_t)(intptr_t)lv_event_get_user_data(e));
+}
+
 void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us, NodeRow* out)
 {
     lv_obj_t* row = box(parent, lv_pct(100), M_ROW_H);
@@ -220,6 +250,8 @@ void add_node_row(lv_obj_t* parent, const node_rec_t* n, int64_t now_us, NodeRow
     lv_obj_set_style_pad_hor(row, 12, 0);
     lv_obj_set_style_pad_column(row, 12, 0);
     hairline_side(row, LV_BORDER_SIDE_BOTTOM);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, row_click_cb, LV_EVENT_CLICKED, (void*)(intptr_t)n->num);
 
     /* badge */
     lv_obj_t* badge = box(row, 46, 46);
@@ -396,9 +428,12 @@ void refresh_cb(lv_timer_t*)
         rebuild_nodes(now);
         S.last_gen  = gen;
         S.last_sort = S.sort;
-    } else if (S.active == 0) {
+    } else if (S.active == 0 && !S.detail_open) {
         refresh_node_rows(now);
     }
+
+    /* keep the open detail view live (SNR / last-heard / telemetry) */
+    if (S.detail_open) populate_detail();
 }
 
 /* The live Nodes tab: header (title + count + sort chips) over a scrolling list. */
@@ -441,6 +476,196 @@ lv_obj_t* make_nodes_panel(lv_obj_t* parent)
     S.nodes_list = list;
 
     return panel;
+}
+
+/* ---- node detail view (PRD §6.3 FR-3.4) ---- */
+
+void fmt_uptime(uint32_t s, char* out, size_t cap)
+{
+    if      (s >= 86400) snprintf(out, cap, "%lud %luh", (unsigned long)(s / 86400), (unsigned long)((s % 86400) / 3600));
+    else if (s >= 3600)  snprintf(out, cap, "%luh %lum", (unsigned long)(s / 3600), (unsigned long)((s % 3600) / 60));
+    else if (s >= 60)    snprintf(out, cap, "%lum", (unsigned long)(s / 60));
+    else                 snprintf(out, cap, "%lus", (unsigned long)s);
+}
+
+/* A stat card: small dim title over a big value. Returns the value label. */
+lv_obj_t* make_card(lv_obj_t* parent, const char* title)
+{
+    lv_obj_t* card = box(parent, 0, 84);
+    lv_obj_set_flex_grow(card, 1);
+    bg(card, C_SURF2);
+    radius(card, M_RAD_M);
+    flex_col(card);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_pad_row(card, 6, 0);
+    label(card, title, FONT_META, C_DIM);
+    return label(card, "—", FONT_TITLE, C_HI);
+}
+
+/* A "label: value" metrics line. Returns the value label. */
+lv_obj_t* make_metric(lv_obj_t* parent, const char* title)
+{
+    lv_obj_t* row = box(parent, lv_pct(100), 34);
+    flex_row(row);
+    lv_obj_set_style_pad_column(row, 10, 0);
+    lv_obj_t* t = label(row, title, FONT_BODY, C_MID);
+    lv_obj_set_width(t, 180);
+    return label(row, "—", FONT_BODY, C_HI);
+}
+
+void back_cb(lv_event_t*) { close_detail(); }
+
+lv_obj_t* make_detail_panel(lv_obj_t* parent)
+{
+    lv_obj_t* panel = box(parent, lv_pct(100), lv_pct(100));
+    bg(panel, C_BG);
+    flex_col(panel);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+
+    /* header: back + badge + name/id */
+    lv_obj_t* hdr = box(panel, lv_pct(100), 64);
+    flex_row(hdr);
+    lv_obj_set_style_pad_hor(hdr, 16, 0);
+    lv_obj_set_style_pad_column(hdr, 14, 0);
+    hairline_side(hdr, LV_BORDER_SIDE_BOTTOM);
+
+    lv_obj_t* back = box(hdr, 44, 44);
+    bg(back, C_SURF);
+    radius(back, M_RAD_M);
+    lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_center(label(back, LV_SYMBOL_LEFT, FONT_BODY, C_HI));
+
+    lv_obj_t* badge = box(hdr, 44, 44);
+    bg(badge, C_SURF);
+    radius(badge, M_RAD_M);
+    S.d_badge = label(badge, "?", FONT_ROW, C_HI);
+    lv_obj_center(S.d_badge);
+
+    lv_obj_t* idcol = box(hdr, 0, 48);
+    lv_obj_set_flex_grow(idcol, 1);
+    flex_col(idcol);
+    lv_obj_set_flex_align(idcol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    S.d_name = label(idcol, "—", FONT_TITLE, C_HI);
+    S.d_id   = label(idcol, "—", FONT_META, C_DIM);
+
+    /* body (scrollable in case of overflow) */
+    lv_obj_t* body = box(panel, lv_pct(100), 0);
+    lv_obj_set_flex_grow(body, 1);
+    flex_col(body);
+    lv_obj_set_style_pad_all(body, 16, 0);
+    lv_obj_set_style_pad_row(body, 14, 0);
+    lv_obj_add_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
+
+    /* stat cards */
+    lv_obj_t* cards = box(body, lv_pct(100), 84);
+    flex_row(cards);
+    lv_obj_set_style_pad_column(cards, 12, 0);
+    S.d_snr   = make_card(cards, "SNR");
+    S.d_hops  = make_card(cards, "HOPS");
+    S.d_heard = make_card(cards, "LAST HEARD");
+    S.d_batt  = make_card(cards, "BATTERY");
+
+    /* position */
+    lv_obj_t* pos = box(body, lv_pct(100), 0);
+    lv_obj_set_height(pos, LV_SIZE_CONTENT);
+    bg(pos, C_SURF2);
+    radius(pos, M_RAD_M);
+    flex_col(pos);
+    lv_obj_set_style_pad_all(pos, 14, 0);
+    lv_obj_set_style_pad_row(pos, 6, 0);
+    label(pos, "POSITION", FONT_META, C_DIM);
+    S.d_pos = label(pos, "—", FONT_ROW, C_HI);
+
+    /* device metrics */
+    lv_obj_t* met = box(body, lv_pct(100), 0);
+    lv_obj_set_height(met, LV_SIZE_CONTENT);
+    bg(met, C_SURF2);
+    radius(met, M_RAD_M);
+    flex_col(met);
+    lv_obj_set_style_pad_all(met, 14, 0);
+    lv_obj_set_style_pad_row(met, 4, 0);
+    label(met, "DEVICE METRICS", FONT_META, C_DIM);
+    S.d_volt   = make_metric(met, "Voltage");
+    S.d_chan   = make_metric(met, "Channel util");
+    S.d_air    = make_metric(met, "Tx airtime");
+    S.d_uptime = make_metric(met, "Uptime");
+
+    return panel;
+}
+
+void populate_detail(void)
+{
+    node_rec_t n;
+    if (!app_state_get_node(S.detail_num, &n)) return;
+
+    set_text(S.d_badge, (n.has_user && n.short_name[0]) ? n.short_name : "?");
+    set_text(S.d_name, n.has_user ? n.long_name : "(unknown node)");
+    char id[20];
+    snprintf(id, sizeof(id), "!%08lx", (unsigned long)n.num);
+    set_text(S.d_id, id);
+
+    /* cards */
+    int bars; uint32_t scol;
+    signal_bucket(n.snr, &bars, &scol);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.1f", (double)n.snr);
+    set_text(S.d_snr, buf);
+    set_color(S.d_snr, scol);
+
+    if (!n.hops_valid)      set_text(S.d_hops, "?");
+    else if (n.hops == 0)   set_text(S.d_hops, "DIRECT");
+    else { snprintf(buf, sizeof(buf), "%d", n.hops); set_text(S.d_hops, buf); }
+    set_color(S.d_hops, n.hops_valid && n.hops == 0 ? C_GREEN : C_HI);
+
+    fmt_age(esp_timer_get_time() - n.last_heard_us, buf, sizeof(buf));
+    set_text(S.d_heard, buf);
+
+    if (n.has_metrics && n.metrics.has_batt) {
+        if (n.metrics.batt > 100) set_text(S.d_batt, "PWR");
+        else { snprintf(buf, sizeof(buf), "%lu%%", (unsigned long)n.metrics.batt); set_text(S.d_batt, buf); }
+    } else set_text(S.d_batt, "—");
+
+    /* position */
+    if (n.has_position && n.position.has_loc) {
+        char pos[80];
+        int len = snprintf(pos, sizeof(pos), "%.5f, %.5f",
+                           n.position.lat_i * 1e-7, n.position.lon_i * 1e-7);
+        if (n.position.has_alt)
+            len += snprintf(pos + len, sizeof(pos) - len, "   alt %ldm", (long)n.position.alt_m);
+        if (n.position.sats)
+            snprintf(pos + len, sizeof(pos) - len, "   %lu sats", (unsigned long)n.position.sats);
+        set_text(S.d_pos, pos);
+    } else {
+        set_text(S.d_pos, "No position reported");
+    }
+
+    /* metrics */
+    const mesh_metrics_t* m = &n.metrics;
+    if (n.has_metrics && m->has_volt)     { snprintf(buf, sizeof(buf), "%.2f V", (double)m->volt); set_text(S.d_volt, buf); }
+    else set_text(S.d_volt, "—");
+    if (n.has_metrics && m->has_chanutil) { snprintf(buf, sizeof(buf), "%.1f %%", (double)m->chan_util); set_text(S.d_chan, buf); }
+    else set_text(S.d_chan, "—");
+    if (n.has_metrics && m->has_airtx)    { snprintf(buf, sizeof(buf), "%.1f %%", (double)m->air_tx); set_text(S.d_air, buf); }
+    else set_text(S.d_air, "—");
+    if (n.has_metrics && m->has_uptime)   { fmt_uptime(m->uptime, buf, sizeof(buf)); set_text(S.d_uptime, buf); }
+    else set_text(S.d_uptime, "—");
+}
+
+void open_detail(uint32_t num)
+{
+    S.detail_num  = num;
+    S.detail_open = true;
+    populate_detail();
+    if (S.detail) lv_obj_clear_flag(S.detail, LV_OBJ_FLAG_HIDDEN);
+}
+
+void close_detail(void)
+{
+    S.detail_open = false;
+    if (S.detail) lv_obj_add_flag(S.detail, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* A content panel: header title + centered milestone placeholder. */
@@ -553,6 +778,7 @@ void build_shell(void)
     S.panel[0] = make_nodes_panel(content);
     S.panel[1] = make_panel(content, "Primary  -  broadcast", "Chat lands in M4");
     S.panel[2] = make_panel(content, "Radio", "Onboarding / device picker lands in M5");
+    S.detail   = make_detail_panel(content);   /* overlays the content area */
 
 #if UI_DIAG_OVERLAY
     /* diagnostics strip pinned to the bottom of the main column */

@@ -14,6 +14,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "mesh_proto.h"   /* mesh_position_t / mesh_metrics_t (POD) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -68,13 +70,18 @@ typedef struct {
 #define APP_MAX_NODES 256
 
 typedef struct {
-    uint32_t num;
-    char     long_name[40];
-    char     short_name[8];
-    float    snr;
-    int      hops;           /* hops_away (0 = direct)            */
-    bool     has_user;
-    int64_t  last_heard_us;  /* esp_timer time at last update     */
+    uint32_t        num;
+    char            long_name[40];
+    char            short_name[8];
+    float           snr;
+    int             hops;           /* hops_away (0 = direct)            */
+    bool            hops_valid;     /* false → hops unknown              */
+    bool            has_user;
+    int64_t         last_heard_us;  /* esp_timer time at last update     */
+    bool            has_position;
+    mesh_position_t position;
+    bool            has_metrics;
+    mesh_metrics_t  metrics;
 } node_rec_t;
 
 void app_state_init(void);
@@ -88,8 +95,17 @@ void app_state_set_diag(const diag_t* diag);
  * generation only on a MEANINGFUL change (new node, or changed name / hops /
  * has_user) so SNR jitter never triggers a full list repaint (FR-3.2). */
 void app_state_upsert_node(uint32_t num, const char* long_name, const char* short_name,
-                           float snr, int hops, bool has_user, int64_t now_us);
+                           float snr, int hops, bool hops_valid, bool has_user, int64_t now_us);
 void app_state_clear_nodes(void);
+
+/* Detail-only updates (NodeInfo-embedded or live POSITION/TELEMETRY packets).
+ * Create the node if unseen; they do NOT bump the node generation (position and
+ * metrics aren't shown in the list, only the detail view). */
+void app_state_set_node_position(uint32_t num, const mesh_position_t* pos, int64_t now_us);
+void app_state_set_node_metrics(uint32_t num, const mesh_metrics_t* metrics, int64_t now_us);
+
+/* Fetch one node by num for the detail view. Returns false if not present. */
+bool app_state_get_node(uint32_t num, node_rec_t* out);
 
 /* ---- readers (called from the UI/LVGL task) ---- */
 void app_state_snapshot(app_snapshot_t* out);

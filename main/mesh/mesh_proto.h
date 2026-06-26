@@ -28,17 +28,43 @@ typedef enum {
     MESH_EV_CONFIG_COMPLETE,  /* config download finished (echoes our id) */
     MESH_EV_CHANNEL,          /* a Channel record                         */
     MESH_EV_TEXT,             /* TEXT_MESSAGE_APP packet                  */
+    MESH_EV_POSITION,         /* POSITION_APP packet (live position)      */
+    MESH_EV_TELEMETRY,        /* TELEMETRY_APP packet (live metrics)      */
     MESH_EV_OTHER,            /* decoded fine, not a variant we act on    */
     MESH_EV_DECODE_FAIL,      /* protobuf decode failed                   */
 } mesh_event_kind_t;
 
+/* GPS position (PRD §6.3). lat/lon are 1e-7 degrees (multiply to get degrees). */
 typedef struct {
-    uint32_t num;
-    char     long_name[40];
-    char     short_name[8];
-    float    snr;
-    int      hops;        /* hops_away (0 = direct)        */
-    bool     has_user;    /* false until a User sub-record arrives */
+    bool    has_loc;
+    int32_t lat_i;
+    int32_t lon_i;
+    bool    has_alt;
+    int32_t alt_m;        /* meters above MSL */
+    uint32_t sats;        /* satellites in view */
+} mesh_position_t;
+
+/* Device telemetry (PRD §6.3). */
+typedef struct {
+    bool     has_batt;     uint32_t batt;        /* 0-100, >100 = powered */
+    bool     has_volt;     float    volt;
+    bool     has_chanutil; float    chan_util;   /* channel utilization %  */
+    bool     has_airtx;    float    air_tx;      /* tx airtime %           */
+    bool     has_uptime;   uint32_t uptime;      /* seconds                */
+} mesh_metrics_t;
+
+typedef struct {
+    uint32_t        num;
+    char            long_name[40];
+    char            short_name[8];
+    float           snr;
+    int             hops;          /* hops_away (0 = direct)        */
+    bool            hops_valid;    /* has_hops_away                 */
+    bool            has_user;      /* false until a User sub-record arrives */
+    bool            has_position;
+    mesh_position_t position;
+    bool            has_metrics;
+    mesh_metrics_t  metrics;
 } mesh_node_t;
 
 typedef struct {
@@ -49,11 +75,13 @@ typedef struct {
 typedef struct {
     mesh_event_kind_t kind;
     union {
-        uint32_t    my_num;              /* MESH_EV_MY_INFO          */
-        mesh_node_t node;                /* MESH_EV_NODE_INFO        */
-        uint32_t    config_complete_id;  /* MESH_EV_CONFIG_COMPLETE  */
-        mesh_text_t text;                /* MESH_EV_TEXT             */
-        int         variant;             /* MESH_EV_OTHER (raw tag)  */
+        uint32_t        my_num;              /* MESH_EV_MY_INFO          */
+        mesh_node_t     node;                /* MESH_EV_NODE_INFO        */
+        uint32_t        config_complete_id;  /* MESH_EV_CONFIG_COMPLETE  */
+        mesh_text_t     text;                /* MESH_EV_TEXT             */
+        struct { uint32_t from; mesh_position_t pos; }     position;   /* MESH_EV_POSITION  */
+        struct { uint32_t from; mesh_metrics_t metrics; }  telemetry;  /* MESH_EV_TELEMETRY */
+        int             variant;             /* MESH_EV_OTHER (raw tag)  */
     } u;
 } mesh_event_t;
 

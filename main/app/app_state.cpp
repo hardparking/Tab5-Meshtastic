@@ -71,24 +71,29 @@ void app_state_set_diag(const diag_t* diag)
     unlock();
 }
 
+/* Find a node by num, or create a bare record. Returns nullptr only if the DB
+ * is full. Sets *created. Caller holds the lock. */
+node_rec_t* find_or_create_locked(uint32_t num, bool* created)
+{
+    for (uint32_t i = 0; i < g.node_n; i++)
+        if (g.nodes[i].num == num) { *created = false; return &g.nodes[i]; }
+    if (g.node_n >= APP_MAX_NODES) return nullptr;   /* bounded (NFR-4) */
+    node_rec_t* rec = &g.nodes[g.node_n++];
+    memset(rec, 0, sizeof(*rec));
+    rec->num       = num;
+    g.s.node_count = g.node_n;
+    *created       = true;
+    return rec;
+}
+
 void app_state_upsert_node(uint32_t num, const char* long_name, const char* short_name,
-                           float snr, int hops, bool has_user, int64_t now_us)
+                           float snr, int hops, bool hops_valid, bool has_user, int64_t now_us)
 {
     lock();
-    node_rec_t* rec = nullptr;
-    for (uint32_t i = 0; i < g.node_n; i++) {
-        if (g.nodes[i].num == num) { rec = &g.nodes[i]; break; }
-    }
-
-    bool meaningful = false;
-    if (!rec) {
-        if (g.node_n >= APP_MAX_NODES) { unlock(); return; }  /* bounded (NFR-4) */
-        rec = &g.nodes[g.node_n++];
-        memset(rec, 0, sizeof(*rec));
-        rec->num         = num;
-        g.s.node_count   = g.node_n;
-        meaningful       = true;   /* new node */
-    }
+    bool created = false;
+    node_rec_t* rec = find_or_create_locked(num, &created);
+    if (!rec) { unlock(); return; }
+    bool meaningful = created;   /* new node is a list change */
 
     /* meaningful field changes (topology / identity), not SNR jitter */
     if (has_user) {
@@ -101,8 +106,9 @@ void app_state_upsert_node(uint32_t num, const char* long_name, const char* shor
         copy_str(rec->short_name, sizeof(rec->short_name), short_name);
         rec->has_user = true;
     }
-    if (rec->hops != hops) meaningful = true;
-    rec->hops = hops;
+    if (rec->hops != hops || rec->hops_valid != hops_valid) meaningful = true;
+    rec->hops       = hops;
+    rec->hops_valid = hops_valid;
 
     /* always-fresh fields (silent) */
     rec->snr           = snr;
@@ -110,6 +116,43 @@ void app_state_upsert_node(uint32_t num, const char* long_name, const char* shor
 
     if (meaningful) g.nodes_gen++;
     unlock();
+}
+
+void app_state_set_node_position(uint32_t num, const mesh_position_t* pos, int64_t now_us)
+{
+    lock();
+    bool created = false;
+    node_rec_t* rec = find_or_create_locked(num, &created);
+    if (!rec) { unlock(); return; }
+    rec->has_position  = true;
+    rec->position      = *pos;
+    rec->last_heard_us = now_us;
+    if (created) g.nodes_gen++;   /* only the new-node case is list-visible */
+    unlock();
+}
+
+void app_state_set_node_metrics(uint32_t num, const mesh_metrics_t* metrics, int64_t now_us)
+{
+    lock();
+    bool created = false;
+    node_rec_t* rec = find_or_create_locked(num, &created);
+    if (!rec) { unlock(); return; }
+    rec->has_metrics   = true;
+    rec->metrics       = *metrics;
+    rec->last_heard_us = now_us;
+    if (created) g.nodes_gen++;
+    unlock();
+}
+
+bool app_state_get_node(uint32_t num, node_rec_t* out)
+{
+    lock();
+    bool found = false;
+    for (uint32_t i = 0; i < g.node_n; i++) {
+        if (g.nodes[i].num == num) { *out = g.nodes[i]; found = true; break; }
+    }
+    unlock();
+    return found;
 }
 
 void app_state_clear_nodes(void)

@@ -282,8 +282,13 @@ static void handle_event(const mesh_event_t* ev, uint16_t len)
         ESP_LOGI(TAG, "NodeInfo: 0x%08lx %s snr=%.1f hops=%d",
                  (unsigned long)n->num, n->has_user ? n->long_name : "(no user)",
                  n->snr, n->hops);
-        app_state_upsert_node(n->num, n->long_name, n->short_name,
-                              n->snr, n->hops, n->has_user, esp_timer_get_time());
+        {
+            int64_t t = esp_timer_get_time();
+            app_state_upsert_node(n->num, n->long_name, n->short_name,
+                                  n->snr, n->hops, n->hops_valid, n->has_user, t);
+            if (n->has_position) app_state_set_node_position(n->num, &n->position, t);
+            if (n->has_metrics)  app_state_set_node_metrics(n->num, &n->metrics, t);
+        }
         if (n->num == s_my_num && n->has_user)
             app_state_set_myinfo(n->num, n->long_name, n->short_name);
         s_d.nodeinfo++;
@@ -301,6 +306,14 @@ static void handle_event(const mesh_event_t* ev, uint16_t len)
         ESP_LOGW(TAG, "TEXT from 0x%08lx: \"%s\"",
                  (unsigned long)ev->u.text.from, ev->u.text.text);
         /* M4 routes this into the chat message log. */
+        break;
+    case MESH_EV_POSITION:
+        app_state_set_node_position(ev->u.position.from, &ev->u.position.pos,
+                                    esp_timer_get_time());
+        break;
+    case MESH_EV_TELEMETRY:
+        app_state_set_node_metrics(ev->u.telemetry.from, &ev->u.telemetry.metrics,
+                                   esp_timer_get_time());
         break;
     case MESH_EV_CHANNEL:
     case MESH_EV_OTHER:

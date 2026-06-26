@@ -13,6 +13,7 @@
 #include "pb_encode.h"
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic/portnums.pb.h"
+#include "meshtastic/telemetry.pb.h"
 
 namespace {
 
@@ -21,6 +22,25 @@ void copy_str(char* dst, size_t cap, const char* src)
     if (!src) { dst[0] = 0; return; }
     strncpy(dst, src, cap - 1);
     dst[cap - 1] = 0;
+}
+
+void map_position(const meshtastic_Position* p, mesh_position_t* out)
+{
+    out->has_loc = p->has_latitude_i && p->has_longitude_i;
+    out->lat_i   = p->latitude_i;
+    out->lon_i   = p->longitude_i;
+    out->has_alt = p->has_altitude;
+    out->alt_m   = p->altitude;
+    out->sats    = p->sats_in_view;
+}
+
+void map_metrics(const meshtastic_DeviceMetrics* m, mesh_metrics_t* out)
+{
+    out->has_batt     = m->has_battery_level;        out->batt      = m->battery_level;
+    out->has_volt     = m->has_voltage;              out->volt      = m->voltage;
+    out->has_chanutil = m->has_channel_utilization;  out->chan_util = m->channel_utilization;
+    out->has_airtx    = m->has_air_util_tx;          out->air_tx    = m->air_util_tx;
+    out->has_uptime   = m->has_uptime_seconds;       out->uptime    = m->uptime_seconds;
 }
 
 }  // namespace
@@ -55,15 +75,20 @@ bool mesh_decode_fromradio(const uint8_t* data, uint16_t len, mesh_event_t* ev)
 
     case meshtastic_FromRadio_node_info_tag: {
         const meshtastic_NodeInfo* ni = &fr.node_info;
-        ev->kind          = MESH_EV_NODE_INFO;
-        ev->u.node.num    = ni->num;
-        ev->u.node.snr    = ni->snr;
-        ev->u.node.hops   = (int)ni->hops_away;
+        ev->kind            = MESH_EV_NODE_INFO;
+        ev->u.node.num      = ni->num;
+        ev->u.node.snr      = ni->snr;
+        ev->u.node.hops     = (int)ni->hops_away;
+        ev->u.node.hops_valid = ni->has_hops_away;
         ev->u.node.has_user = ni->has_user;
         if (ni->has_user) {
             copy_str(ev->u.node.long_name, sizeof(ev->u.node.long_name), ni->user.long_name);
             copy_str(ev->u.node.short_name, sizeof(ev->u.node.short_name), ni->user.short_name);
         }
+        ev->u.node.has_position = ni->has_position;
+        if (ni->has_position) map_position(&ni->position, &ev->u.node.position);
+        ev->u.node.has_metrics = ni->has_device_metrics;
+        if (ni->has_device_metrics) map_metrics(&ni->device_metrics, &ev->u.node.metrics);
         break;
     }
 
@@ -78,17 +103,45 @@ bool mesh_decode_fromradio(const uint8_t* data, uint16_t len, mesh_event_t* ev)
 
     case meshtastic_FromRadio_packet_tag: {
         const meshtastic_MeshPacket* mp = &fr.packet;
-        if (mp->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
-            mp->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
+        if (mp->which_payload_variant != meshtastic_MeshPacket_decoded_tag) {
+            ev->kind      = MESH_EV_OTHER;   /* encrypted — can't read it */
+            ev->u.variant = (int)fr.which_payload_variant;
+            break;
+        }
+        const meshtastic_Data* d = &mp->decoded;
+        if (d->portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
             ev->kind         = MESH_EV_TEXT;
             ev->u.text.from  = mp->from;
-            size_t n = mp->decoded.payload.size;
+            size_t n = d->payload.size;
             if (n > sizeof(ev->u.text.text) - 1) n = sizeof(ev->u.text.text) - 1;
-            memcpy(ev->u.text.text, mp->decoded.payload.bytes, n);
+            memcpy(ev->u.text.text, d->payload.bytes, n);
             ev->u.text.text[n] = 0;
+        } else if (d->portnum == meshtastic_PortNum_POSITION_APP) {
+            /* payload is an inner Position protobuf */
+            meshtastic_Position p = meshtastic_Position_init_zero;
+            pb_istream_t ps = pb_istream_from_buffer(d->payload.bytes, d->payload.size);
+            if (pb_decode(&ps, meshtastic_Position_fields, &p)) {
+                ev->kind             = MESH_EV_POSITION;
+                ev->u.position.from  = mp->from;
+                map_position(&p, &ev->u.position.pos);
+            } else {
+                ev->kind = MESH_EV_OTHER;
+            }
+        } else if (d->portnum == meshtastic_PortNum_TELEMETRY_APP) {
+            /* payload is an inner Telemetry protobuf; we want device_metrics */
+            meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
+            pb_istream_t ts = pb_istream_from_buffer(d->payload.bytes, d->payload.size);
+            if (pb_decode(&ts, meshtastic_Telemetry_fields, &t) &&
+                t.which_variant == meshtastic_Telemetry_device_metrics_tag) {
+                ev->kind              = MESH_EV_TELEMETRY;
+                ev->u.telemetry.from  = mp->from;
+                map_metrics(&t.variant.device_metrics, &ev->u.telemetry.metrics);
+            } else {
+                ev->kind = MESH_EV_OTHER;
+            }
         } else {
             ev->kind      = MESH_EV_OTHER;
-            ev->u.variant = (int)fr.which_payload_variant;
+            ev->u.variant = (int)d->portnum;
         }
         break;
     }
