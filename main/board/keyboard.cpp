@@ -22,9 +22,6 @@ static const char* TAG = "kbd";
 
 static m5::M5Tab5Keyboard s_kb;
 static QueueHandle_t s_queue = nullptr;
-static bool s_present = false;
-
-bool kbd_present(void) { return s_present; }
 
 /* Driver poll-task context. Keep it short: just enqueue the decoded string. */
 static void key_cb(m5_tab5_key_event_t ev, void* /*arg*/)
@@ -68,6 +65,5 @@ void kbd_start(void)
     s_kb.getVersion(&ver);
     ESP_LOGI(TAG, "physical keyboard ready (FW 0x%02X)", ver);
 
-    s_present = true;
     xTaskCreate(kbd_task, "kbd_ui", 4096, nullptr, 5, nullptr);
 }

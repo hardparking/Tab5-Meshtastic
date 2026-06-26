@@ -22,10 +22,6 @@ extern "C" {
  * no keyboard is present. */
 void kbd_start(void);
 
-/* True once a physical keyboard has been detected and brought up. The UI uses
- * this to suppress the on-screen keyboard when hardware input is available. */
-bool kbd_present(void);
-
 #ifdef __cplusplus
 }
 #endif

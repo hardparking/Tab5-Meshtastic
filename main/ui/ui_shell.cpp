@@ -12,7 +12,6 @@
 #include "app_state.h"
 #include "settings.h"
 #include "ble_transport.h"
-#include "keyboard.h"
 
 #include "lvgl.h"
 #include "lvgl_port.h"
@@ -815,9 +814,6 @@ void ta_event_cb(lv_event_t* e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_FOCUSED) {
-        /* With a physical keyboard attached, the on-screen keyboard is just
-         * clutter — only summon it as a touch-only fallback. */
-        if (kbd_present()) return;
         lv_keyboard_set_textarea(S.chat_kb, S.chat_input);
         lv_obj_clear_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
     } else if (code == LV_EVENT_DEFOCUSED) {
@@ -1358,16 +1354,20 @@ void ui_start(void)
  * LVGL lock and drive the same paths the touch UI uses (do_send / the PIN
  * buffer), so input from either source behaves identically.
  *
- * STRING mode delivers one whole token per event: a single printable byte for
- * an ordinary key, or a *named* word for a special key ("backspace", "enter",
- * "space", ...). So we classify the token, not byte-by-byte — otherwise the
- * letters of a key name would be typed verbatim. Unknown named keys are dropped. */
+ * STRING mode delivers one whole token per event: an ordinary key as a single
+ * character (NUL-padded — `str_len` counts the padding, so an 'a' arrives as
+ * len=2 "a\0"), or a *named* word for a special key ("backspace", "enter", ...).
+ * We classify on the NUL-trimmed length, not `len`, and as a token rather than
+ * byte-by-byte — otherwise the letters of a key name would be typed verbatim.
+ * Unknown named keys are dropped. */
 enum kbd_action { KBD_NONE, KBD_TEXT, KBD_BACKSPACE, KBD_SUBMIT };
 
 static kbd_action kbd_classify(const char* str, unsigned char len, char* text_out)
 {
     text_out[0] = 0;
-    if (len == 1) {
+    size_t eff = strnlen(str, len);   /* real length, ignoring trailing NUL padding */
+    if (eff == 0) return KBD_NONE;
+    if (eff == 1) {
         char c = str[0];
         if (c == '\b' || c == 0x7f) return KBD_BACKSPACE;
         if (c == '\n' || c == '\r') return KBD_SUBMIT;
@@ -1376,7 +1376,7 @@ static kbd_action kbd_classify(const char* str, unsigned char len, char* text_ou
     }
     /* Named special key — match case-insensitively. */
     char name[16];
-    size_t n = len < sizeof(name) - 1 ? len : sizeof(name) - 1;
+    size_t n = eff < sizeof(name) - 1 ? eff : sizeof(name) - 1;
     for (size_t i = 0; i < n; i++) name[i] = (char)tolower((unsigned char)str[i]);
     name[n] = 0;
 
