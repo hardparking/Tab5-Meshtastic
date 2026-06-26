@@ -25,6 +25,7 @@
 #include "lcd_tools.h"
 #include "ui_shell.h"
 #include "app_state.h"
+#include "settings.h"
 #include "ble_transport.h"
 
 static const char* TAG = "tab5-mesh-v2";
@@ -44,6 +45,8 @@ extern "C" void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    settings_init();   /* load saved device(s) before the transport starts */
 
     /* Board bring-up, then power the C6 coprocessor BEFORE esp_hosted. */
     m5::tab5::m5tab5_component_config_t board_cfg = {};

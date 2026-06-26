@@ -4,6 +4,7 @@ idf_component_register(
         "board/lcd_tools.cpp"
         "ui/ui_shell.cpp"
         "app/app_state.cpp"
+        "app/settings.cpp"
         "mesh/mesh_proto.cpp"
         "ble/ble_transport.cpp"
     INCLUDE_DIRS

@@ -66,6 +66,13 @@ typedef struct {
     diag_t       diag;
 } app_snapshot_t;
 
+/* ---- saved device (PRD §6.1 / §10 Settings) ---- */
+typedef struct {
+    uint8_t addr[6];   /* BLE address bytes (little-endian, as NimBLE reports) */
+    char    name[32];  /* friendly name from the advertisement                */
+    char    pin[8];    /* up to 6 PIN digits + NUL                            */
+} saved_device_t;
+
 /* ---- node DB (PRD §10) ---- */
 #define APP_MAX_NODES 256
 
