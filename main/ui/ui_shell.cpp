@@ -12,12 +12,14 @@
 #include "app_state.h"
 #include "settings.h"
 #include "ble_transport.h"
+#include "keyboard.h"
 
 #include "lvgl.h"
 #include "lvgl_port.h"
 
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -813,6 +815,9 @@ void ta_event_cb(lv_event_t* e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_FOCUSED) {
+        /* With a physical keyboard attached, the on-screen keyboard is just
+         * clutter — only summon it as a touch-only fallback. */
+        if (kbd_present()) return;
         lv_keyboard_set_textarea(S.chat_kb, S.chat_input);
         lv_obj_clear_flag(S.chat_kb, LV_OBJ_FLAG_HIDDEN);
     } else if (code == LV_EVENT_DEFOCUSED) {
@@ -1351,42 +1356,66 @@ void ui_start(void)
 
 /* Physical-keyboard text routing. Called off the keyboard task; we take the
  * LVGL lock and drive the same paths the touch UI uses (do_send / the PIN
- * buffer), so input from either source behaves identically. */
+ * buffer), so input from either source behaves identically.
+ *
+ * STRING mode delivers one whole token per event: a single printable byte for
+ * an ordinary key, or a *named* word for a special key ("backspace", "enter",
+ * "space", ...). So we classify the token, not byte-by-byte — otherwise the
+ * letters of a key name would be typed verbatim. Unknown named keys are dropped. */
+enum kbd_action { KBD_NONE, KBD_TEXT, KBD_BACKSPACE, KBD_SUBMIT };
+
+static kbd_action kbd_classify(const char* str, unsigned char len, char* text_out)
+{
+    text_out[0] = 0;
+    if (len == 1) {
+        char c = str[0];
+        if (c == '\b' || c == 0x7f) return KBD_BACKSPACE;
+        if (c == '\n' || c == '\r') return KBD_SUBMIT;
+        if ((unsigned char)c >= 0x20) { text_out[0] = c; text_out[1] = 0; return KBD_TEXT; }
+        return KBD_NONE;
+    }
+    /* Named special key — match case-insensitively. */
+    char name[16];
+    size_t n = len < sizeof(name) - 1 ? len : sizeof(name) - 1;
+    for (size_t i = 0; i < n; i++) name[i] = (char)tolower((unsigned char)str[i]);
+    name[n] = 0;
+
+    if (!strcmp(name, "backspace") || !strcmp(name, "bksp") || !strcmp(name, "bs") ||
+        !strcmp(name, "delete") || !strcmp(name, "del"))
+        return KBD_BACKSPACE;
+    if (!strcmp(name, "enter") || !strcmp(name, "return") || !strcmp(name, "ent"))
+        return KBD_SUBMIT;
+    if (!strcmp(name, "space")) { text_out[0] = ' '; text_out[1] = 0; return KBD_TEXT; }
+    return KBD_NONE;   /* tab, arrows, fn keys, etc. — ignored */
+}
+
 void ui_kbd_feed(const char* str, unsigned char len, unsigned char modifier)
 {
     if (!str || len == 0) return;
     /* Ctrl / Alt chords aren't text — ignore them (PIN and chat want plain keys). */
     if (modifier == 1 || modifier == 4 || modifier == 5) return;
+
+    char text[2];
+    kbd_action act = kbd_classify(str, len, text);
+    if (act == KBD_NONE) return;
+
     if (!lvgl_port_lock(100)) return;   /* drop input rather than block the kbd task */
 
-    const bool pin_active  = (S.active == 2 && S.radio_view == 2);
-    const bool chat_active = (S.active == 1);
-
-    for (unsigned char i = 0; i < len; i++) {
-        const char c = str[i];
-        const bool backspace = (c == '\b' || c == 0x7f);
-        const bool submit    = (c == '\n' || c == '\r');
-
-        if (pin_active) {
-            size_t plen = strlen(S.pin_buf);
-            if (backspace) {
-                if (plen) { S.pin_buf[plen - 1] = 0; update_pin_disp(); }
-            } else if (submit) {
-                if (S.pin_buf[0]) ble_transport_submit_pin((uint32_t)atoi(S.pin_buf));
-            } else if (c >= '0' && c <= '9' && plen < 6) {
-                S.pin_buf[plen] = c;
-                S.pin_buf[plen + 1] = 0;
-                update_pin_disp();
-            }
-        } else if (chat_active && S.chat_input) {
-            if (backspace) {
-                lv_textarea_delete_char(S.chat_input);
-            } else if (submit) {
-                do_send();
-            } else if ((unsigned char)c >= 0x20) {
-                lv_textarea_add_char(S.chat_input, (uint32_t)(unsigned char)c);
-            }
+    if (S.active == 2 && S.radio_view == 2) {           /* PIN entry */
+        size_t plen = strlen(S.pin_buf);
+        if (act == KBD_BACKSPACE) {
+            if (plen) { S.pin_buf[plen - 1] = 0; update_pin_disp(); }
+        } else if (act == KBD_SUBMIT) {
+            if (S.pin_buf[0]) ble_transport_submit_pin((uint32_t)atoi(S.pin_buf));
+        } else if (act == KBD_TEXT && text[0] >= '0' && text[0] <= '9' && plen < 6) {
+            S.pin_buf[plen] = text[0];
+            S.pin_buf[plen + 1] = 0;
+            update_pin_disp();
         }
+    } else if (S.active == 1 && S.chat_input) {         /* chat composer */
+        if (act == KBD_BACKSPACE) lv_textarea_delete_char(S.chat_input);
+        else if (act == KBD_SUBMIT) do_send();
+        else if (act == KBD_TEXT) lv_textarea_add_text(S.chat_input, text);
     }
 
     lvgl_port_unlock();
