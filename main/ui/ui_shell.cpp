@@ -52,6 +52,8 @@ struct ShellState {
     lv_obj_t* conn_lbl = nullptr;
     lv_obj_t* count_lbl = nullptr;
     lv_obj_t* diag_lbl = nullptr;   /* bottom diagnostics strip */
+    lv_obj_t* diag_box = nullptr;   /* its container (toggled)   */
+    bool      diag_on  = false;     /* hidden by default (release look) */
 
     /* nodes tab */
     lv_obj_t* nodes_list     = nullptr;
@@ -222,6 +224,15 @@ void set_tab(int i)
 }
 
 void nav_cb(lv_event_t* e) { set_tab((int)(intptr_t)lv_event_get_user_data(e)); }
+
+/* Long-press the status bar to reveal/hide the on-screen diagnostics strip
+ * (FR-5.1: hidden in "release", summonable on-device since serial resets the P4). */
+void diag_toggle_cb(lv_event_t*)
+{
+    if (!S.diag_box) return;
+    S.diag_on = !S.diag_on;
+    (S.diag_on ? lv_obj_clear_flag : lv_obj_add_flag)(S.diag_box, LV_OBJ_FLAG_HIDDEN);
+}
 
 /* ---- node rows ---- */
 
@@ -439,7 +450,7 @@ void refresh_cb(lv_timer_t*)
     set_text(S.count_lbl, cnt);
 
 #if UI_DIAG_OVERLAY
-    if (S.diag_lbl) {
+    if (S.diag_lbl && S.diag_on) {
         const diag_t* d = &s.diag;
         char wc = d->wc_acked ? 'Y' : (d->wc_sent ? 'q' : 'n');
         char line[176];
@@ -1245,6 +1256,8 @@ void build_shell(void)
     lv_obj_set_style_pad_hor(sb, 18, 0);
     lv_obj_set_style_pad_column(sb, 16, 0);
     hairline_side(sb, LV_BORDER_SIDE_BOTTOM);
+    lv_obj_add_flag(sb, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(sb, diag_toggle_cb, LV_EVENT_LONG_PRESSED, nullptr);
 
     lv_obj_t* mb = box(sb, 36, 36);
     bg(mb, C_SURF);
@@ -1291,11 +1304,13 @@ void build_shell(void)
     S.detail   = make_detail_panel(content);   /* overlays the content area */
 
 #if UI_DIAG_OVERLAY
-    /* diagnostics strip pinned to the bottom of the main column */
+    /* diagnostics strip pinned to the bottom — hidden until long-press summons it */
     lv_obj_t* diag = box(col, lv_pct(100), 22);
     bg(diag, C_CHROME);
     lv_obj_set_style_pad_hor(diag, 10, 0);
     hairline_side(diag, LV_BORDER_SIDE_TOP);
+    lv_obj_add_flag(diag, LV_OBJ_FLAG_HIDDEN);
+    S.diag_box = diag;
     S.diag_lbl = label(diag, "diag", FONT_META, C_DIM);
     lv_obj_center(S.diag_lbl);
 #endif
